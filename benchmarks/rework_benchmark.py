@@ -9,6 +9,7 @@ result.json layout as the legacy baseline, plus the acceptance check.
 import argparse
 import json
 import os
+import subprocess
 import sys
 import time
 from dataclasses import asdict
@@ -57,6 +58,14 @@ FEATURES = {
 }
 
 
+def code_state() -> dict:
+    """Commit of the working tree and whether library code has uncommitted changes."""
+    def git(*args):
+        return subprocess.run(['git', *args], cwd=REPO_ROOT, capture_output=True, text=True).stdout.strip()
+    return {'commit': git('rev-parse', '--short', 'HEAD'),
+            'library_dirty': bool(git('status', '--porcelain', '--', 'dragen', 'InputGenerator'))}
+
+
 def run(case: str, box: float, resolution: float, seed: int, out_dir: str = None) -> dict:
     config = RveConfig(box=BoxConfig((box,) * 3, resolution), phases=CASES[case](), seed=seed,
                        **FEATURES.get(case, dict)())
@@ -79,7 +88,7 @@ def run(case: str, box: float, resolution: float, seed: int, out_dir: str = None
     inclusions = inclusion_report(result.labels, result.grains, result.domain, requested)
 
     out = {
-        'case': case, 'box': box, 'resolution': resolution, 'seed': seed,
+        'case': case, 'box': box, 'resolution': resolution, 'seed': seed, 'code': code_state(),
         'shape': list(result.labels.shape), 'n_grains': len(result.grains),
         'seconds': {**{k: round(v, 3) for k, v in result.seconds.items()}, 'total': round(total, 3)},
         'report': rep.to_dict(),

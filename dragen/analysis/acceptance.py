@@ -1,0 +1,52 @@
+"""Acceptance criteria every generated RVE has to meet.
+
+The limits are calibrated on the legacy generator (benchmarks/results/legacy) so the rework must
+be at least as faithful to its input, and they add hard requirements the legacy code misses:
+no grain may be split into several bodies, because the boundary meshing builds one closed
+surface per grain.
+"""
+from dataclasses import dataclass
+from typing import Dict, List
+
+from dragen.analysis.metrics import RveReport
+
+
+@dataclass(frozen=True)
+class Limits:
+    min_fill_ratio: float = 1.0
+    max_empty_grains: int = 0
+    max_fragmented_grains: int = 0
+    volume_ratio_median: tuple = (0.95, 1.05)
+    min_volume_ratio_p10: float = 0.70
+    max_volume_ratio_p90: float = 1.20
+    max_volume_ks: float = 0.12
+    max_phase_fraction_error: float = 0.03
+
+
+DEFAULT_LIMITS = Limits()
+
+
+def violations(rep: RveReport, target_phase_fractions: Dict[int, float],
+               limits: Limits = DEFAULT_LIMITS) -> List[str]:
+    """Return one readable line per violated criterion; an empty list means accepted."""
+    out = []
+    if rep.fill_ratio < limits.min_fill_ratio:
+        out.append(f'fill_ratio {rep.fill_ratio:.4f} < {limits.min_fill_ratio}')
+    if rep.empty_grains > limits.max_empty_grains:
+        out.append(f'{rep.empty_grains} grains have no voxel')
+    if rep.fragmented_grains > limits.max_fragmented_grains:
+        out.append(f'{rep.fragmented_grains} of {rep.n_grains} grains are split into several bodies')
+    lo, hi = limits.volume_ratio_median
+    if not lo <= rep.volume_ratio_median <= hi:
+        out.append(f'median volume ratio {rep.volume_ratio_median:.3f} outside [{lo}, {hi}]')
+    if rep.volume_ratio_p10 < limits.min_volume_ratio_p10:
+        out.append(f'p10 volume ratio {rep.volume_ratio_p10:.3f} < {limits.min_volume_ratio_p10}')
+    if rep.volume_ratio_p90 > limits.max_volume_ratio_p90:
+        out.append(f'p90 volume ratio {rep.volume_ratio_p90:.3f} > {limits.max_volume_ratio_p90}')
+    if rep.volume_ks > limits.max_volume_ks:
+        out.append(f'volume KS distance {rep.volume_ks:.3f} > {limits.max_volume_ks}')
+    for phase, target in target_phase_fractions.items():
+        actual = rep.phase_fractions.get(int(phase), 0.0)
+        if abs(actual - target) > limits.max_phase_fraction_error:
+            out.append(f'phase {phase}: fraction {actual:.3f}, target {target:.3f}')
+    return out

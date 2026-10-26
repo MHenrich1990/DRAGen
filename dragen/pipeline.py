@@ -43,15 +43,23 @@ def sample_grains(config: RveConfig, domain: VoxelDomain, rng: np.random.Generat
     return grains.take(np.argsort(-grains.volume, kind='stable'))
 
 
-def growth_epochs(grains: GrainTable, shrink: float, bin_size: float, margin: float):
-    """Per-axis relative growth rate and the epoch at which every kernel reaches margin * radii.
+def growth_rates(grains: GrainTable, shrink: float, bin_size: float, margin: float, exponent: float):
+    """Relative growth rate per grain and axis, and per grain the epoch at which its kernel
+    reaches margin * radii.
 
-    The legacy growth law scales every grain by the same factor per epoch and axis, so one epoch
-    limit covers all kernels.
+    rate[g, i] = bin_size / (R_i ** (1 - exponent) * r_g ** exponent)
+
+    R_i is the largest shrunk radius along axis i over all grains, r_g the largest shrunk radius
+    of grain g. exponent = 0 is the legacy law (Henrich et al. 2020): every grain grows by the
+    same factor per epoch, so small grains advance their front by a fraction of a voxel per epoch.
+    exponent = 1 moves the front of every grain by about one voxel per epoch along its longest
+    axis, keeping its shape.
     """
-    r0_max = grains.radii.max(axis=0) * shrink
-    rate = bin_size / r0_max
-    max_epoch = int(np.ceil(((margin / shrink) - 1) / rate.min()))
+    r0 = grains.radii * shrink
+    axis_max = r0.max(axis=0)
+    grain_max = r0.max(axis=1, keepdims=True)
+    rate = bin_size / (axis_max ** (1 - exponent) * grain_max ** exponent)
+    max_epoch = np.ceil(((margin / shrink) - 1) / rate.min(axis=1)).astype(int)
     return rate, max_epoch
 
 
@@ -66,10 +74,11 @@ def generate(config: RveConfig) -> RveResult:
 
     t = time.perf_counter()
     shrink = config.rsa.shrink_factor
-    rate, max_epoch = growth_epochs(grains, shrink, bin_size=min(domain.spacing),
-                                     margin=config.tessellation.kernel_margin)
-    kernels = [build_kernel(r, a, domain.spacing, shrink, rate, max_epoch)
-               for r, a in zip(grains.radii, grains.alpha)]
+    rate, max_epoch = growth_rates(grains, shrink, bin_size=min(domain.spacing),
+                                   margin=config.tessellation.kernel_margin,
+                                   exponent=config.tessellation.growth_exponent)
+    kernels = [build_kernel(r, a, domain.spacing, shrink, g, k)
+               for r, a, g, k in zip(grains.radii, grains.alpha, rate, max_epoch)]
     seconds['kernels'] = time.perf_counter() - t
 
     labels = domain.new_labels()

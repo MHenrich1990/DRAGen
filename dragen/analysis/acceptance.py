@@ -9,6 +9,10 @@ The lower volume bound (p10) applies to the main body of each grain. The legacy 
 p10 of 0.68-0.89 over all voxels of a grain, but only 0.62-0.78 when the pieces it scattered
 behind neighbouring grains are not counted (benchmarks/results/legacy, lognormal and gan_dual
 cases). Without those pieces small grains enclosed by larger ones stay below target.
+
+The upper bound (p90) was 1.20 (legacy: 1.11-1.19) and is 1.25 since the growth exponent 0.3
+became the default: speeding up small grains lets some of them overshoot. Over the calibration
+runs p90 reached at most 1.204 at exponent 0.3, while the worst p10 rose from 0.40 to 0.685.
 """
 from dataclasses import dataclass
 from typing import Dict, List
@@ -23,7 +27,7 @@ class Limits:
     max_fragmented_grains: int = 0
     volume_ratio_median: tuple = (0.95, 1.05)
     min_main_body_ratio_p10: float = 0.60
-    max_volume_ratio_p90: float = 1.20
+    max_volume_ratio_p90: float = 1.25
     max_volume_ks: float = 0.12
     max_phase_fraction_error: float = 0.03
 

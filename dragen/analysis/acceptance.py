@@ -4,6 +4,11 @@ The limits are calibrated on the legacy generator (benchmarks/results/legacy) so
 be at least as faithful to its input, and they add hard requirements the legacy code misses:
 no grain may be split into several bodies, because the boundary meshing builds one closed
 surface per grain.
+
+The lower volume bound (p10) applies to the main body of each grain. The legacy code reaches a
+p10 of 0.68-0.89 over all voxels of a grain, but only 0.62-0.78 when the pieces it scattered
+behind neighbouring grains are not counted (benchmarks/results/legacy, lognormal and gan_dual
+cases). Without those pieces small grains enclosed by larger ones stay below target.
 """
 from dataclasses import dataclass
 from typing import Dict, List
@@ -17,7 +22,7 @@ class Limits:
     max_empty_grains: int = 0
     max_fragmented_grains: int = 0
     volume_ratio_median: tuple = (0.95, 1.05)
-    min_volume_ratio_p10: float = 0.70
+    min_main_body_ratio_p10: float = 0.60
     max_volume_ratio_p90: float = 1.20
     max_volume_ks: float = 0.12
     max_phase_fraction_error: float = 0.03
@@ -39,8 +44,8 @@ def violations(rep: RveReport, target_phase_fractions: Dict[int, float],
     lo, hi = limits.volume_ratio_median
     if not lo <= rep.volume_ratio_median <= hi:
         out.append(f'median volume ratio {rep.volume_ratio_median:.3f} outside [{lo}, {hi}]')
-    if rep.volume_ratio_p10 < limits.min_volume_ratio_p10:
-        out.append(f'p10 volume ratio {rep.volume_ratio_p10:.3f} < {limits.min_volume_ratio_p10}')
+    if rep.main_body_ratio_p10 < limits.min_main_body_ratio_p10:
+        out.append(f'p10 main-body volume ratio {rep.main_body_ratio_p10:.3f} < {limits.min_main_body_ratio_p10}')
     if rep.volume_ratio_p90 > limits.max_volume_ratio_p90:
         out.append(f'p90 volume ratio {rep.volume_ratio_p90:.3f} > {limits.max_volume_ratio_p90}')
     if rep.volume_ks > limits.max_volume_ks:

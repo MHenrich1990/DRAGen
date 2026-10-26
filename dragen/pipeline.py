@@ -3,9 +3,12 @@
 Solver export follows in a later phase (E1).
 
 Volume bookkeeping: band grains hold `filling` times the volume of their band slab; the matrix
-phases share the rest of the box according to their fractions. Inclusions are cut out of the
-grains after tessellation, their volume fraction refers to the whole box.
+phases share the rest of the box according to their fractions. Matrix grains are not seeded
+inside a band. Inclusions are cut out of the grains after tessellation, their volume fraction
+refers to the whole box. An inclusion only fits into a grain that can hold it together with its
+shell; inclusions that fit nowhere are left out and logged.
 """
+import logging
 import time
 from dataclasses import dataclass, field
 from typing import Dict, List
@@ -125,13 +128,17 @@ def generate(config: RveConfig) -> RveResult:
         centers.append(placer.place(labels, kernels[start:start + len(table)], first_id=start + 1,
                                     region=band.mask(domain)))
         start += len(table)
-    centers.append(placer.place(labels, kernels[start:], first_id=start + 1))
+    # matrix grains may grow into a band but not be seeded there (at most 10 % of a seed inside)
+    outside_bands = None
+    if bands:
+        outside_bands = ~np.any([b.mask(domain) for b in bands], axis=0)
+    centers.append(placer.place(labels, kernels[start:], first_id=start + 1, region=outside_bands))
     centers = np.concatenate(centers)
     seconds['rsa'] = time.perf_counter() - t
 
     t = time.perf_counter()
     tessellator = Tessellator(domain, config.tessellation, rng)
-    tessellator.run(labels, kernels, centers)
+    tessellator.run(labels, kernels, centers, no_fill_up=grains.band >= 0)
     seconds['tessellation'] = time.perf_counter() - t
 
     t = time.perf_counter()
@@ -153,6 +160,10 @@ def generate(config: RveConfig) -> RveResult:
         grains = GrainTable.concat([grains, inclusions.take(placed).with_centers(inclusion_centers)])
         targets += [inclusion_kernels[i].target_voxels for i in placed]
         inclusion_stats = inclusion_placer.stats
+        if inclusion_stats.not_placed:
+            logging.getLogger(__name__).warning(
+                '%d of %d inclusions fit into no grain and were left out',
+                inclusion_stats.not_placed, inclusion_stats.not_placed + inclusion_stats.placed)
         seconds['inclusions'] = time.perf_counter() - t
 
     return RveResult(labels=labels, grains=grains, domain=domain, target_voxels=np.array(targets),

@@ -35,6 +35,7 @@ def inclusion_report(labels: np.ndarray, grains: GrainTable, domain: VoxelDomain
     """Placed inclusions, their volume fraction, and whether any touches a grain boundary.
 
     requested: number of sampled inclusions (placed + not placed); defaults to the placed ones.
+    expected_placed_fraction: continuous ellipsoid volume of the placed inclusions / box volume.
 
     touching_boundary counts inclusions whose face neighbours belong to more than one other label
     (they would sit on a grain boundary) or to another inclusion.
@@ -42,7 +43,8 @@ def inclusion_report(labels: np.ndarray, grains: GrainTable, domain: VoxelDomain
     flat = labels.ravel()
     ids = np.flatnonzero(grains.phase == Phase.INCLUSIONS) + 1
     if ids.size == 0:
-        return {'inclusions': int(requested or 0), 'placed': 0, 'volume_fraction': 0.0, 'touching_boundary': 0}
+        return {'inclusions': int(requested or 0), 'placed': 0, 'volume_fraction': 0.0,
+                'expected_placed_fraction': 0.0, 'touching_boundary': 0}
     counts = np.bincount(flat[flat > 0], minlength=ids.max() + 1)[ids]
     placed = ids[counts > 0]
     touching = 0
@@ -53,5 +55,7 @@ def inclusion_report(labels: np.ndarray, grains: GrainTable, domain: VoxelDomain
         others = np.unique(nb[nb != i])
         if len(others) != 1 or np.isin(others, ids).any():
             touching += 1
+    expected = grains.volume[placed - 1].sum() / (flat.size * domain.voxel_volume)
     return {'inclusions': int(requested if requested is not None else ids.size), 'placed': int(placed.size),
-            'volume_fraction': float(counts.sum() / flat.size), 'touching_boundary': touching}
+            'volume_fraction': float(counts.sum() / flat.size), 'expected_placed_fraction': float(expected),
+            'touching_boundary': touching}

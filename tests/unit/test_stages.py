@@ -129,3 +129,21 @@ def test_kernel_wider_than_half_the_box_still_fills_it():
     assert np.all(labels > 0)
     assert tess.stats.filled_after_rsa + tess.stats.filled_regular + tess.stats.filled_reset \
         + tess.stats.filled_by_dilation == dom.n_voxels
+
+
+def test_grains_without_fill_up_do_not_take_part_in_it():
+    dom = VoxelDomain((24, 24, 24), (0.5,) * 3, (True,) * 3)
+
+    def run(excluded: bool):
+        rng = np.random.default_rng(2)
+        # 30 grains whose ellipsoids together hold about the box volume (12^3 um^3)
+        kernels = kernels_for(rng.uniform(2.0, 2.8, size=(30, 3)), dom.spacing)
+        labels = dom.new_labels()
+        centers = RsaPlacer(dom, RsaConfig(), rng).place(labels, kernels)
+        no_fill_up = np.zeros(30, dtype=bool)
+        no_fill_up[:10] = excluded
+        Tessellator(dom, TessellationConfig(), rng).run(labels, kernels, centers, no_fill_up=no_fill_up)
+        assert np.all(labels > 0)
+        return np.bincount(labels.ravel(), minlength=31)[1:11].sum()
+
+    assert run(excluded=True) < run(excluded=False)

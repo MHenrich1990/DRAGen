@@ -68,24 +68,31 @@ class FeatureLimits:
     max_band_outside_fraction: float = 0.20
     """share of a band's grain volume that grew out of its slab"""
     max_inclusion_fraction_error: float = 0.25
-    """relative deviation of the inclusion volume fraction from the configured one"""
+    """relative deviation of the volume fraction of the placed inclusions from the volume they were
+    sampled with (an inclusion that fits into no grain is left out on purpose and not counted)"""
 
 
 def feature_violations(bands: List[dict], inclusions: dict, band_filling: float, inclusion_fraction: float,
                        limits: FeatureLimits = FeatureLimits()) -> List[str]:
-    """Criteria for bands (dragen.analysis.features.band_report) and inclusions (inclusion_report)."""
+    """Criteria for bands (dragen.analysis.features.band_report) and inclusions (inclusion_report).
+
+    Inclusions only go into grains that can hold them (Henrich et al. 2023: inside the grown
+    grains); inclusions that fit nowhere are not a violation. Checked are that every placed
+    inclusion is complete (`placed_volume_fraction` against `expected_placed_fraction`) and that
+    none touches a grain boundary.
+    """
     out = []
     for b in bands:
         if abs(b['filling'] - band_filling) > limits.max_band_filling_error:
             out.append(f"band {b['band']}: filling {b['filling']:.3f}, target {band_filling:.3f}")
         if b['outside_fraction'] > limits.max_band_outside_fraction:
             out.append(f"band {b['band']}: {b['outside_fraction']:.1%} of its grain volume lies outside the band")
-    if inclusion_fraction > 0:
-        if inclusions['placed'] < inclusions['inclusions']:
-            out.append(f"only {inclusions['placed']} of {inclusions['inclusions']} inclusions placed")
+    if inclusion_fraction > 0 and inclusions['placed']:
         if inclusions['touching_boundary']:
             out.append(f"{inclusions['touching_boundary']} inclusions touch a grain boundary or another inclusion")
-        error = abs(inclusions['volume_fraction'] - inclusion_fraction) / inclusion_fraction
+        expected = inclusions['expected_placed_fraction']
+        error = abs(inclusions['volume_fraction'] - expected) / expected
         if error > limits.max_inclusion_fraction_error:
-            out.append(f"inclusion volume fraction {inclusions['volume_fraction']:.4f}, target {inclusion_fraction:.4f}")
+            out.append(f"placed inclusions fill {inclusions['volume_fraction']:.4f} of the box, "
+                       f"their ellipsoids {expected:.4f}")
     return out

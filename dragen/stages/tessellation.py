@@ -15,7 +15,7 @@ Differences to the legacy code:
   * Voxels no kernel reaches are filled at the end from adjacent grains.
 """
 from dataclasses import dataclass, field
-from typing import List
+from typing import List, Optional
 
 import numpy as np
 
@@ -44,7 +44,13 @@ class Tessellator:
         self.stats = TessellationStats()
 
     def run(self, labels: np.ndarray, kernels: List[EllipsoidKernel], centers: np.ndarray,
-            first_id: int = 1) -> np.ndarray:
+            first_id: int = 1, no_fill_up: Optional[np.ndarray] = None) -> np.ndarray:
+        """Grow grain i (label first_id + i) from its seed until the box is full.
+
+        no_fill_up: boolean per grain; these grains stop at their target volume and do not take
+        part in the fill-up phase (band grains, as in the legacy code), so the remaining space is
+        filled by the others.
+        """
         flat_labels = labels.reshape(-1)
         n = len(kernels)
         ids = first_id + np.arange(n)
@@ -115,14 +121,15 @@ class Tessellator:
                 if not reset:
                     reset = True
                     self.stats.reset_epoch = k
-                active = np.flatnonzero(~exhausted)
+                active = np.flatnonzero(~exhausted & (True if no_fill_up is None else ~no_fill_up))
             if active.size == 0:
                 break
 
         self.stats.epochs = k
         free = int(np.count_nonzero(flat_labels == 0))
         if free > 0:
-            self.stats.filled_by_dilation = self._fill_from_neighbours(flat_labels)
+            excluded_ids = None if no_fill_up is None else ids[np.asarray(no_fill_up, dtype=bool)]
+            self.stats.filled_by_dilation = self._fill_from_neighbours(flat_labels, excluded_ids)
         return labels
 
     def _claim_connected(self, flat_labels, candidates, grain_id, stamp, token) -> int:
@@ -142,8 +149,11 @@ class Tessellator:
             layer = np.unique(nb[(stamp[nb] == token) & (flat_labels[nb] == 0)])
         return claimed
 
-    def _fill_from_neighbours(self, flat_labels: np.ndarray) -> int:
-        """Give every remaining free voxel to a random adjacent grain, front by front."""
+    def _fill_from_neighbours(self, flat_labels: np.ndarray, excluded_ids=None) -> int:
+        """Give every remaining free voxel to a random adjacent grain, front by front.
+
+        Grains in excluded_ids (no fill-up) are only chosen if a voxel has no other grain neighbour.
+        """
         filled = 0
         while True:
             free = np.flatnonzero(flat_labels == 0)
@@ -151,10 +161,12 @@ class Tessellator:
                 return filled
             nb = self.domain.face_neighbors(free)
             nb_labels = np.where(nb >= 0, flat_labels[np.maximum(nb, 0)], 0)
-            priority = np.where(nb_labels > 0, self.rng.random(nb.shape), -1.0)
+            priority = np.where(nb_labels > 0, self.rng.random(nb.shape), -2.0)
+            if excluded_ids is not None and len(excluded_ids):
+                priority = np.where(np.isin(nb_labels, excluded_ids), priority - 1.0, priority)
             pick = priority.argmax(axis=1)
             chosen = nb_labels[np.arange(len(free)), pick]
-            reachable = chosen > 0
+            reachable = priority[np.arange(len(free)), pick] > -2.0
             if not reachable.any():
                 raise RuntimeError('free voxels without any grain neighbour remain')
             flat_labels[free[reachable]] = chosen[reachable]

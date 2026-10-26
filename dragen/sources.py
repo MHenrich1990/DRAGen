@@ -6,7 +6,7 @@ optional columns b, c (default a), alpha (default 0) and phi1, PHI, phi2 (defaul
 A GAN source draws a fresh set of synthetic grains from a trained WGAN (.pkl, see
 InputGenerator/) for every RVE, as the legacy generator did.
 """
-from typing import Optional
+from typing import Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -44,19 +44,24 @@ class GrainSource:
         raise NotImplementedError
 
     def sample(self, volume: float, rng: np.random.Generator, min_radius: float = 0.0,
-               max_radius: Optional[float] = None, tolerance: float = 0.05) -> GrainTable:
+               max_radius: Optional[float] = None, tolerance: float = 0.05,
+               max_extent: Optional[Tuple[int, float]] = None) -> GrainTable:
         """Draw grains without replacement until their total volume lies in [volume, (1 + tolerance) * volume].
 
         If at the end no remaining grain fits into that band, the grain that overshoots least is
         added, so the total reaches the volume. Grains with a radius below min_radius (they would
         not cover one voxel) or a above max_radius (larger than half the box) are skipped, as in
-        the legacy sampler. Raises if the source does not hold enough volume.
+        the legacy sampler. max_extent = (axis, length) also skips grains whose ellipsoid is longer
+        than length along that axis (band grains must fit into the band thickness). Raises if the
+        source does not hold enough volume.
         """
         data = self._grain_data(rng)
         radii = data[['a', 'b', 'c'][:self.ndim]].to_numpy()
         keep = radii.min(axis=1) >= min_radius
         if max_radius is not None:
             keep &= data['a'].to_numpy() < max_radius
+        if max_extent is not None:
+            keep &= self._extent(data, max_extent[0]) <= max_extent[1]
         candidates = rng.permutation(np.flatnonzero(keep))
         vol = self._volume(radii[candidates])
 
@@ -81,6 +86,16 @@ class GrainSource:
             raise ValueError(f'{self.path}: not enough grains for a volume of {volume:.1f} '
                              f'(reached {total:.1f})')
         return self._table(data, np.asarray(chosen), rng)
+
+    def _extent(self, data: pd.DataFrame, axis: int) -> np.ndarray:
+        """Length of each ellipsoid along an axis (alpha rotates about the last axis)."""
+        if axis == self.ndim - 1 and self.ndim == 3:
+            return 2 * data['c'].to_numpy()
+        t = np.deg2rad(data['alpha'].to_numpy())
+        a, b = data['a'].to_numpy(), data['b'].to_numpy()
+        if axis == 0:
+            return 2 * np.sqrt((a * np.cos(t)) ** 2 + (b * np.sin(t)) ** 2)
+        return 2 * np.sqrt((a * np.sin(t)) ** 2 + (b * np.cos(t)) ** 2)
 
     def _volume(self, radii: np.ndarray) -> np.ndarray:
         return (4 / 3 if self.ndim == 3 else 1.0) * np.pi * np.prod(radii, axis=1)

@@ -53,7 +53,16 @@ CASES = {
     'gan_dual': lambda: ({2: os.path.join(REPO_ROOT, 'ExampleInput/Martensite/TrainedData_Martensite.pkl'),
                           5: os.path.join(REPO_ROOT, 'ExampleInput/Austenite/TrainedData_Austenite.pkl')},
                          {2: 0.5, 5: 0.5}),
+    # feature cases with the inputs of tests/scenarios/Case_033 (bands) and Case_035 (inclusions)
+    'banded': lambda: ({2: os.path.join(REPO_ROOT, 'ExampleInput/Martensite/TrainedData_Martensite.pkl'),
+                        7: os.path.join(REPO_ROOT, 'ExampleInput/Banding/TrainedData_Martensite_bands.pkl')},
+                       {2: 0.9, 7: 0.1}),
+    'inclusions': lambda: ({2: os.path.join(REPO_ROOT, 'ExampleInput/Martensite/TrainedData_Martensite.pkl'),
+                            6: os.path.join(REPO_ROOT, 'ExampleInput/Inclusions/TrainedData_Inclusions.pkl')},
+                           {2: 0.95, 6: 0.05}),
 }
+
+BAND_SETTINGS = {'banded': dict(number_of_bands=1, lower_band_bound=2, upper_band_bound=4, band_filling=0.5)}
 
 
 class StageTimer:
@@ -150,8 +159,8 @@ def run(case: str, box: float, resolution: float, seed: int, out_dir: str = None
         calibration_rve_flag=False, element_type='HEX8', pbc_flag=False, submodel_flag=False,
         phase2iso_flag={i: True for i in range(1, 6)}, smoothing_flag=False, xfem_flag=False,
         gui_flag=False, anim_flag=False, root=out_dir, info_box_obj=None, progress_obj=None,
-        phase_ratio=phase_ratio, file_dict=files, phases=PHASES, number_of_bands=0,
-        upper_band_bound=0, lower_band_bound=0, band_orientation='xy', band_filling=0,
+        phase_ratio=phase_ratio, file_dict=files, phases=PHASES, band_orientation='xy',
+        **BAND_SETTINGS.get(case, dict(number_of_bands=0, lower_band_bound=0, upper_band_bound=0, band_filling=0)),
         subs_flag=False, subs_file_flag=False, subs_file=None, t_mu=1.0)
     Run.setup_logging()
     Run.initializations(0)
@@ -165,7 +174,8 @@ def run(case: str, box: float, resolution: float, seed: int, out_dir: str = None
                capture=lambda c, a, r: c.__setitem__('labels', r[0].copy()))
     trace = trace_tessellation_epochs(Tesselation3D)
     timer.wrap(DataTask3D, 'grain_sampling', 'sampling_total')
-    timer.wrap(DataTask3D, 'rve_generation', 'generation_total')
+    timer.wrap(DataTask3D, 'rve_generation', 'generation_total',
+               capture=lambda c, a, r: c.__setitem__('final_labels', np.asarray(r[0]).copy()))
 
     task = DataTask3D()
     total_df, _ = task.grain_sampling()
@@ -188,6 +198,9 @@ def run(case: str, box: float, resolution: float, seed: int, out_dir: str = None
         'tessellation': summarize_trace(trace),
     }
     np.savez_compressed(os.path.join(out_dir, 'labels.npz'), labels=labels)
+    if 'final_labels' in timer.captured:
+        # label field after bands/inclusions were applied (periodic copy: last layer repeats the first)
+        np.savez_compressed(os.path.join(out_dir, 'final_labels.npz'), labels=timer.captured['final_labels'])
     grains.to_csv(os.path.join(out_dir, 'grains.csv'), index=False)
     with open(os.path.join(out_dir, 'result.json'), 'w', encoding='utf-8') as f:
         json.dump(result, f, indent=2)

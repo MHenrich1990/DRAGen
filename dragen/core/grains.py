@@ -16,6 +16,7 @@ class GrainTable:
     alpha: (G,) rotation about the last axis in degrees.
     euler: (G, 3) Bunge Euler angles in degrees.
     phase: (G,) phase ID.
+    band: (G,) index of the band a grain was seeded in, -1 for matrix grains and inclusions.
     centers: (G, ndim) centre voxel per grain, set by the RSA; None before.
     """
 
@@ -23,11 +24,14 @@ class GrainTable:
     alpha: np.ndarray
     euler: np.ndarray
     phase: np.ndarray
+    band: Optional[np.ndarray] = None
     centers: Optional[np.ndarray] = field(default=None)
 
     def __post_init__(self):
         n = len(self.radii)
-        if not (len(self.alpha) == len(self.euler) == len(self.phase) == n):
+        if self.band is None:
+            object.__setattr__(self, 'band', np.full(n, -1, dtype=int))
+        if not (len(self.alpha) == len(self.euler) == len(self.phase) == len(self.band) == n):
             raise ValueError('all grain columns need the same length')
         if self.radii.ndim != 2 or self.radii.shape[1] not in (2, 3):
             raise ValueError(f'radii must be (G, 2) or (G, 3), got {self.radii.shape}')
@@ -48,20 +52,27 @@ class GrainTable:
 
     def take(self, index) -> 'GrainTable':
         return GrainTable(radii=self.radii[index], alpha=self.alpha[index], euler=self.euler[index],
-                          phase=self.phase[index],
+                          phase=self.phase[index], band=self.band[index],
                           centers=None if self.centers is None else self.centers[index])
 
     def with_centers(self, centers: np.ndarray) -> 'GrainTable':
         return replace(self, centers=np.asarray(centers))
 
+    def with_band(self, band: int) -> 'GrainTable':
+        return replace(self, band=np.full(len(self), band, dtype=int))
+
     @staticmethod
     def concat(tables: Sequence['GrainTable']) -> 'GrainTable':
-        if any(t.centers is not None for t in tables):
-            raise ValueError('concatenate grain tables before the RSA assigns centres')
+        tables = [t for t in tables if len(t)]
+        with_centers = [t.centers is not None for t in tables]
+        if any(with_centers) and not all(with_centers):
+            raise ValueError('either all or none of the tables need centres')
         return GrainTable(radii=np.concatenate([t.radii for t in tables]),
                           alpha=np.concatenate([t.alpha for t in tables]),
                           euler=np.concatenate([t.euler for t in tables]),
-                          phase=np.concatenate([t.phase for t in tables]))
+                          phase=np.concatenate([t.phase for t in tables]),
+                          band=np.concatenate([t.band for t in tables]),
+                          centers=np.concatenate([t.centers for t in tables]) if all(with_centers) else None)
 
     def to_frame(self) -> pd.DataFrame:
         """Grain i of the table is grain ID i + 1 in the label field."""
@@ -70,6 +81,7 @@ class GrainTable:
         df['alpha'] = self.alpha
         df[EULER] = self.euler
         df['phaseID'] = self.phase
+        df['band'] = self.band
         df['volume'] = self.volume
         if self.centers is not None:
             df[[f'center_{a}' for a in 'xyz'[:self.ndim]]] = self.centers

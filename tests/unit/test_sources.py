@@ -59,3 +59,17 @@ def test_band_narrower_than_one_grain_still_reaches_target(tmp_path):
     table = CsvSource(str(path), 'ferrite').sample(50.0, np.random.default_rng(0))
     assert len(table) == 2
     assert table.volume.sum() >= 50.0
+
+
+def test_max_extent_limits_size_along_band_normal(tmp_path):
+    path = tmp_path / 'g.csv'
+    rng = np.random.default_rng(0)
+    a = rng.uniform(0.5, 3, 2000)
+    pd.DataFrame({'a': a, 'b': a * 0.6, 'c': a * 0.5, 'alpha': rng.uniform(0, 180, 2000)}).to_csv(path, index=False)
+    src = CsvSource(str(path), 'martensite')
+    z = src.sample(200.0, np.random.default_rng(1), max_extent=(2, 2.0))
+    assert (2 * z.radii[:, 2]).max() <= 2.0
+    x = src.sample(200.0, np.random.default_rng(1), max_extent=(0, 2.0))
+    t = np.deg2rad(x.alpha)
+    extent_x = 2 * np.sqrt((x.radii[:, 0] * np.cos(t)) ** 2 + (x.radii[:, 1] * np.sin(t)) ** 2)
+    assert extent_x.max() <= 2.0 + 1e-9

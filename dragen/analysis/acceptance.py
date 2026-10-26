@@ -59,3 +59,33 @@ def violations(rep: RveReport, target_phase_fractions: Dict[int, float],
         if abs(actual - target) > limits.max_phase_fraction_error:
             out.append(f'phase {phase}: fraction {actual:.3f}, target {target:.3f}')
     return out
+
+
+@dataclass(frozen=True)
+class FeatureLimits:
+    max_band_filling_error: float = 0.10
+    """absolute deviation of the filling inside each band slab from the configured filling"""
+    max_band_outside_fraction: float = 0.20
+    """share of a band's grain volume that grew out of its slab"""
+    max_inclusion_fraction_error: float = 0.25
+    """relative deviation of the inclusion volume fraction from the configured one"""
+
+
+def feature_violations(bands: List[dict], inclusions: dict, band_filling: float, inclusion_fraction: float,
+                       limits: FeatureLimits = FeatureLimits()) -> List[str]:
+    """Criteria for bands (dragen.analysis.features.band_report) and inclusions (inclusion_report)."""
+    out = []
+    for b in bands:
+        if abs(b['filling'] - band_filling) > limits.max_band_filling_error:
+            out.append(f"band {b['band']}: filling {b['filling']:.3f}, target {band_filling:.3f}")
+        if b['outside_fraction'] > limits.max_band_outside_fraction:
+            out.append(f"band {b['band']}: {b['outside_fraction']:.1%} of its grain volume lies outside the band")
+    if inclusion_fraction > 0:
+        if inclusions['placed'] < inclusions['inclusions']:
+            out.append(f"only {inclusions['placed']} of {inclusions['inclusions']} inclusions placed")
+        if inclusions['touching_boundary']:
+            out.append(f"{inclusions['touching_boundary']} inclusions touch a grain boundary or another inclusion")
+        error = abs(inclusions['volume_fraction'] - inclusion_fraction) / inclusion_fraction
+        if error > limits.max_inclusion_fraction_error:
+            out.append(f"inclusion volume fraction {inclusions['volume_fraction']:.4f}, target {inclusion_fraction:.4f}")
+    return out

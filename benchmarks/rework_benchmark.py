@@ -21,9 +21,10 @@ sys.path.insert(0, os.path.dirname(__file__))
 
 from legacy_baseline import lognormal_input  # noqa: E402
 from dragen.analysis import metrics  # noqa: E402
-from dragen.analysis.acceptance import violations  # noqa: E402
-from dragen.config import BoxConfig, PhaseConfig, RveConfig  # noqa: E402
-from dragen.pipeline import generate  # noqa: E402
+from dragen.analysis.acceptance import feature_violations, violations  # noqa: E402
+from dragen.analysis.features import band_report, inclusion_report  # noqa: E402
+from dragen.config import BandConfig, BoxConfig, InclusionConfig, PhaseConfig, RveConfig  # noqa: E402
+from dragen.pipeline import expected_phase_fractions, generate  # noqa: E402
 
 RESULT_DIR = os.path.join(REPO_ROOT, 'benchmarks', 'results', 'rework')
 
@@ -33,11 +34,32 @@ CASES = {
     'gan_dual': lambda: (
         PhaseConfig('martensite', os.path.join(REPO_ROOT, 'ExampleInput/Martensite/TrainedData_Martensite.pkl'), 0.5),
         PhaseConfig('austenite', os.path.join(REPO_ROOT, 'ExampleInput/Austenite/TrainedData_Austenite.pkl'), 0.5)),
+    # same inputs as the legacy 'banded' and 'inclusions' cases (tests/scenarios/Case_033, Case_035)
+    'banded': lambda: (
+        PhaseConfig('martensite', os.path.join(REPO_ROOT, 'ExampleInput/Martensite/TrainedData_Martensite.pkl'), 1.0),),
+    'inclusions': lambda: (
+        PhaseConfig('martensite', os.path.join(REPO_ROOT, 'ExampleInput/Martensite/TrainedData_Martensite.pkl'), 1.0),),
+    # coarse ferrite matrix whose grains can host the GAN inclusions
+    'inclusions_ferrite_1pct': lambda: (PhaseConfig('ferrite', lognormal_input(), 1.0),),
+    'inclusions_ferrite_5pct': lambda: (PhaseConfig('ferrite', lognormal_input(), 1.0),),
+}
+
+FEATURES = {
+    'banded': lambda: dict(bands=BandConfig(
+        count=1, phase='martensite', thickness=(2, 4), filling=0.5,
+        source=os.path.join(REPO_ROOT, 'ExampleInput/Banding/TrainedData_Martensite_bands.pkl'))),
+    'inclusions': lambda: dict(inclusions=InclusionConfig(
+        source=os.path.join(REPO_ROOT, 'ExampleInput/Inclusions/TrainedData_Inclusions.pkl'), fraction=0.05)),
+    'inclusions_ferrite_1pct': lambda: dict(inclusions=InclusionConfig(
+        source=os.path.join(REPO_ROOT, 'ExampleInput/Inclusions/TrainedData_Inclusions.pkl'), fraction=0.01)),
+    'inclusions_ferrite_5pct': lambda: dict(inclusions=InclusionConfig(
+        source=os.path.join(REPO_ROOT, 'ExampleInput/Inclusions/TrainedData_Inclusions.pkl'), fraction=0.05)),
 }
 
 
 def run(case: str, box: float, resolution: float, seed: int, out_dir: str = None) -> dict:
-    config = RveConfig(box=BoxConfig((box,) * 3, resolution), phases=CASES[case](), seed=seed)
+    config = RveConfig(box=BoxConfig((box,) * 3, resolution), phases=CASES[case](), seed=seed,
+                       **FEATURES.get(case, dict)())
     if out_dir is None:
         out_dir = os.path.join(RESULT_DIR, f'{case}_box{box:g}_res{resolution:g}_seed{seed}')
     os.makedirs(out_dir, exist_ok=True)
@@ -51,7 +73,10 @@ def run(case: str, box: float, resolution: float, seed: int, out_dir: str = None
     rep = metrics.report(result.labels, target, phase, result.domain.voxel_volume, config.box.periodic)
     stats = result.tessellation
     n = result.labels.size
-    target_ratio = {int(p.phase): p.fraction for p in config.phases}
+    target_ratio = expected_phase_fractions(config, result.bands, result.domain)
+    bands = band_report(result.labels, result.grains, result.bands, result.domain)
+    requested = None if result.inclusions is None else result.inclusions.placed + result.inclusions.not_placed
+    inclusions = inclusion_report(result.labels, result.grains, result.domain, requested)
 
     out = {
         'case': case, 'box': box, 'resolution': resolution, 'seed': seed,
@@ -59,7 +84,10 @@ def run(case: str, box: float, resolution: float, seed: int, out_dir: str = None
         'seconds': {**{k: round(v, 3) for k, v in result.seconds.items()}, 'total': round(total, 3)},
         'report': rep.to_dict(),
         'target_phase_ratio': target_ratio,
-        'acceptance_violations': violations(rep, target_ratio),
+        'acceptance_violations': violations(rep, target_ratio) + feature_violations(
+            bands, inclusions, config.bands.filling, config.inclusions.fraction),
+        'bands': bands,
+        'inclusions': inclusions,
         'rsa_attempts': result.rsa_attempts,
         'repaired_voxels': result.repaired_voxels,
         'tessellation': {

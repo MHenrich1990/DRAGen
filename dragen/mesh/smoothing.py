@@ -11,8 +11,9 @@ Works on the surface model of M2 and only moves points; the triangles stay as th
      vertices involved and their neighbours are blended back towards their voxel corners (the
      staircase has none of these problems)
   6. fallback: a grain still more than `volume_tolerance` off its voxel volume (e.g. a grain of
-     one voxel, which cannot be rounded without losing volume) gets the surface vertices of its
-     inner surfaces back on their voxel corners
+     one voxel, which cannot be rounded without losing volume) is put back on the staircase: all
+     vertices of its surfaces except anchors return to their voxel corners. Neighbours that drift
+     out of tolerance by this are treated the same way in the next round.
 
 Smoothing is Taubin's lambda/mu scheme (a shrinking Laplacian step followed by an inflating one),
 which removes the voxel steps without shrinking the shape as plain Laplacian smoothing does.
@@ -53,6 +54,7 @@ class SmoothingConfig:
     vertices is halved (up to `guard_halvings` times, then dropped)."""
     guard_halvings: int = 4
     volume_tolerance: float = 0.01
+    fallback_rounds: int = 10
     untangle_rounds: int = 6
     """Halvings of the move towards the voxel corner per crossing; the last round resets fully."""
     min_wedge: float = 10.0
@@ -108,9 +110,8 @@ class Smoother:
             for _ in range(self.config.volume_iterations):
                 x = self._correct_volume(x, target, frozen=touched)
             x, stats['untangling_after_correction'], again = self._untangle(x)
-        x, stats['reverted_grains'] = self._revert_off_volume(x, target)
-        if stats['reverted_grains']:
-            x, stats['untangling_after_revert'], _ = self._untangle(x)
+        x, fallback = self._revert_off_volume(x, target)
+        stats['reverted_grains'], stats['fallback_rounds'] = fallback['grains'], fallback['rounds']
         stats['volume_final'] = self._volume_error(x, target)
         d = np.linalg.norm(x - self.origin, axis=1) / float(self.spacing.min())
         stats['displacement_voxels'] = {'max': float(d.max()) if len(d) else 0.0,
@@ -302,17 +303,30 @@ class Smoother:
         return x, stats, touched
 
     def _revert_off_volume(self, x, target):
-        vol = self._grain_volumes(x)
-        off = [g for g in target if abs(vol[g] - target[g]) > self.config.volume_tolerance * target[g]]
-        if not off:
-            return x, 0
+        """Put every grain that is off its volume back on the staircase (all its surface and line
+        vertices, with their periodic images), untangle, and repeat while grains are off."""
         model = self.model
-        surfaces = np.unique(np.concatenate([model.shells[g][:, 0] for g in off]))
-        surfaces = [p for p in surfaces if not is_box_face(model.surfaces[p].regions[1])]
-        back = (model.vertex_kind == ON_SURFACE) & np.isin(model.vertex_entity, surfaces)
-        x = x.copy()
-        x[back] = self.origin[back]
-        return x, len(off)
+        reverted = set()
+        rounds = 0
+        while rounds < self.config.fallback_rounds:
+            vol = self._grain_volumes(x)
+            off = [g for g in target if abs(vol[g] - target[g]) > self.config.volume_tolerance * target[g]]
+            if not off:
+                break
+            surfaces = np.unique(np.concatenate([model.shells[g][:, 0] for g in off]))
+            back = np.zeros(len(x), dtype=bool)
+            back[model.oriented[np.isin(model.topology.patch, surfaces)].ravel()] = True
+            back &= model.vertex_kind != FIXED
+            if self.n_cls < len(x):
+                cls_back = np.zeros(self.n_cls, dtype=bool)
+                cls_back[self.cls[back]] = True
+                back = cls_back[self.cls]
+            x = x.copy()
+            x[back] = self.origin[back]
+            x, _, _ = self._untangle(x)
+            reverted.update(off)
+            rounds += 1
+        return x, {'grains': len(reverted), 'rounds': rounds}
 
     # ------------------------------------------------------------------------------------- #
 

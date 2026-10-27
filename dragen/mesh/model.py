@@ -184,9 +184,11 @@ def build_model(topo: Topology) -> SurfaceModel:
     he_line = topo.edge_line[he_edge]
     on_line = he_line >= 0
     nxt = (np.arange(3 * f) // 3) * 3 + (np.arange(3 * f) % 3 + 1) % 3     # next half-edge in triangle
-    # twin within the same patch: (patch, to, from)
-    key_rows, key_inv = unique_pairs(he_patch, he_from * n_points + he_to, return_inverse=True)
-    twin_key = _lookup(key_rows, he_patch, he_to * n_points + he_from)
+    # twin within the same patch: same patch and edge, other direction (edge index and a direction
+    # bit keep the keys small enough for int64 even on very large meshes)
+    direction = (he_from > he_to).astype(np.int64)
+    key_rows, key_inv = unique_pairs(he_patch, 2 * he_edge + direction, return_inverse=True)
+    twin_key = _lookup(key_rows, he_patch, 2 * he_edge + 1 - direction)
     lookup_he = np.full(len(key_rows), -1, dtype=np.int64)
     lookup_he[key_inv] = np.arange(3 * f)
     twin = np.where(twin_key >= 0, lookup_he[np.maximum(twin_key, 0)], -1)
@@ -350,11 +352,11 @@ def _pinched(topo: Topology) -> List[int]:
 def _misoriented(model: SurfaceModel) -> int:
     """Triangle edges inside a surface that are not traversed in opposite directions."""
     tris = model.oriented
-    f = len(tris)
-    patch = np.repeat(model.topology.patch, 3)
+    topo = model.topology
+    patch = np.repeat(topo.patch, 3)
     u, v = tris.ravel(), tris[:, [1, 2, 0]].ravel()
-    n = len(model.mesh.points)
-    rows, counts = unique_pairs(patch, u * n + v, return_counts=True)
+    edge = _edge_index(topo.edges, u, v, len(model.mesh.points))
+    _, counts = unique_pairs(patch, 2 * edge + (u > v), return_counts=True)
     return int(np.count_nonzero(counts > 1))
 
 

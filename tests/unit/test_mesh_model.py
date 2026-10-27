@@ -137,3 +137,11 @@ def test_generated_rve_model(generated):
     assert check['periodic_surfaces'] > 0 and check['periodic_curves'] > 0
     # every surface on a periodic box face is master or slave
     assert check['unmatched_periodic_surfaces'] == 0
+
+
+def test_check_detects_a_flipped_triangle():
+    model = model_of(corpus.two_halves())
+    # a triangle away from every line: all three edges are shared inside its surface
+    inner = np.flatnonzero(np.all(model.vertex_kind[model.oriented] == ON_SURFACE, axis=1))[0]
+    model.oriented[inner] = model.oriented[inner, ::-1]
+    assert model.check()['misoriented_triangles'] == 3

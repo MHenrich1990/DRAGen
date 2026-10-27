@@ -112,7 +112,8 @@ class Topology:
     def patch_boundary_euler(self) -> np.ndarray:
         pe, pv = self._patch_boundary()
         n = len(self.patch_regions)
-        return np.bincount(unique_pairs(pv[:, 0], pv[:, 1])[:, 0], minlength=n) - np.bincount(pe[:, 0], minlength=n)
+        vertices = np.bincount(unique_pairs(pv[:, 0], pv[:, 1])[:, 0], minlength=n)
+        return vertices - np.bincount(pe[:, 0], minlength=n)
 
     def pinched_patches(self) -> int:
         """Patches with a boundary vertex used by more than two of their boundary edges."""

@@ -1,9 +1,10 @@
-"""Clean-up and topology (phase M1) on the RVEs of the reworked generator.
+"""Clean-up, topology (M1) and surface model (M2) on the RVEs of the reworked generator.
 
 Reads every benchmarks/results/rework/<tag>/labels.npz (written by rework_benchmark.py), removes
 edge and point self-contacts (dragen.mesh.cleanup), builds the topology (dragen.mesh.topology)
-and checks it: every grain surface a closed 2-manifold, every grain still one body, Euler check
-equal to 1, no anchor inside a patch.
+and the discrete surface model (dragen.mesh.model) and checks them: every grain surface a closed
+2-manifold, every grain still one body, Euler check equal to 1, no anchor inside a patch, and the
+model checks (every curve used, closed shells, consistent orientation, exact periodic links).
 
 Example:
     venv/Scripts/python benchmarks/topology_benchmark.py                       # all stored RVEs
@@ -28,6 +29,7 @@ from rework_benchmark import code_state  # noqa: E402
 from dragen.analysis.metrics import components_per_grain  # noqa: E402
 from dragen.config import RveConfig  # noqa: E402
 from dragen.mesh.cleanup import ManifoldCleaner  # noqa: E402
+from dragen.mesh.model import build_model  # noqa: E402
 from dragen.mesh.quality import grain_surfaces  # noqa: E402
 from dragen.mesh.topology import build_topology  # noqa: E402
 
@@ -67,6 +69,13 @@ def run(tag: str) -> dict:
     out['topology']['line_edges_median'] = float(np.median(lengths)) if len(lengths) else 0.0
     out['topology']['mesh_triangles'] = int(len(topo.mesh.triangles))
 
+    t = time.perf_counter()
+    model = build_model(topo)
+    out['seconds']['model'] = time.perf_counter() - t
+    t = time.perf_counter()
+    out['model'] = model.check()
+    out['seconds']['model_checks'] = time.perf_counter() - t
+
     surfaces = grain_surfaces(topo.mesh)
     out['checks'] = {
         'grains_not_closed_manifold': int(np.count_nonzero(~surfaces['closed_manifold'])),
@@ -94,6 +103,7 @@ def main():
         row = {'tag': tag, 'voxels': int(np.prod(result['shape'])), 'grains': result['n_grains']}
         row.update({f'cleanup_{k}': v for k, v in result['cleanup'].items()})
         row.update({k: v for k, v in result['topology'].items() if not isinstance(v, dict)})
+        row.update({f'model_{k}': v for k, v in result['model'].items()})
         row.update({f'check_{k}': v for k, v in result['checks'].items()})
         row.update({f'seconds_{k}': v for k, v in result['seconds'].items()})
         rows.append(row)

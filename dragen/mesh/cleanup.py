@@ -12,9 +12,10 @@ every axis, matching the box mesh, in which the box faces are regions of their o
 Repair is greedy: for each violating block, try giving one of its voxels to a face neighbour's
 grain, and take the change that removes the most violations in the eight blocks around that
 voxel. Where every single change adds as many violations as it removes (e.g. a grain touching
-itself at a point inside a crowded junction), pairs of changes are tried. A voxel is only taken from a grain if the grain keeps at least one voxel and the grain's
-voxels around it stay face-connected (checked in the 3x3x3 neighbourhood, wrapped on periodic
-axes), so no grain falls apart.
+itself at a point inside a crowded junction), pairs of changes are tried. A voxel is only taken
+from a grain if the grain keeps at least one voxel and the grain's voxels around it stay
+face-connected (checked in the 3x3x3 neighbourhood, wrapped on periodic axes), so no grain falls
+apart.
 """
 import logging
 from dataclasses import dataclass, field

@@ -40,8 +40,8 @@ from dragen.mesh.surface import is_box_face
 
 @dataclass
 class SmoothingConfig:
-    line_iterations: int = 20
-    surface_iterations: int = 30
+    line_iterations: int = 10
+    surface_iterations: int = 15
     lam: float = 0.5
     mu: float = -0.53
     max_displacement: float = 1.0
@@ -54,7 +54,12 @@ class SmoothingConfig:
     vertices is halved (up to `guard_halvings` times, then dropped)."""
     guard_halvings: int = 4
     volume_tolerance: float = 0.01
-    fallback_rounds: int = 10
+    """Allowed volume error per grain: this fraction of its volume or one voxel volume,
+    whichever is larger (author's decision, process notes section 2)."""
+    fallback_rounds: int = 1000
+    stop_tolerance: float = 1e-3
+    """A smoothing stage ends early once no vertex moves more than this (voxel edges) in an
+    iteration; steps below a thousandth of it are dropped and not checked."""
     untangle_rounds: int = 6
     """Halvings of the move towards the voxel corner per crossing; the last round resets fully."""
     min_wedge: float = 10.0
@@ -96,10 +101,17 @@ class Smoother:
         x = self.origin.copy()
         target = self._voxel_volumes()
         stats = {'volume_before': self._volume_error(x, target)}
-        for _ in range(self.config.line_iterations):
-            x = self._taubin(x, self.line_mover, self.line_nbr)
-        for _ in range(self.config.surface_iterations):
-            x = self._taubin(x, self.surf_mover, self.surf_nbr)
+        stats['iterations'] = {}
+        for name, n, mover, nbr in (('lines', self.config.line_iterations, self.line_mover, self.line_nbr),
+                                    ('surfaces', self.config.surface_iterations, self.surf_mover, self.surf_nbr)):
+            done = 0
+            for done in range(1, n + 1):
+                before = x
+                x = self._taubin(x, mover, nbr)
+                moved = np.sqrt(_dot(x - before, x - before)).max() if len(x) else 0.0
+                if moved < self.config.stop_tolerance * float(self.spacing.min()):
+                    break
+            stats['iterations'][name] = done
         stats['volume_after_smoothing'] = self._volume_error(x, target)
         for _ in range(self.config.volume_iterations):
             x = self._correct_volume(x, target)
@@ -177,16 +189,26 @@ class Smoother:
         same = key[order[1:]] == key[order[:-1]]
         first, second = order[:-1][same], order[1:][same]
         self.w = np.column_stack([a[first], b[first], c[first], c[second]])
+        # a flat edge inside one surface needs no wedge check: the fold guard keeps both normals
+        # within acos(min_cos) of their common staircase normal, so the wedge stays open
+        side_src = np.concatenate([np.arange(len(tris)), np.flatnonzero(inner)])
+        same_patch = patch[side_src[first // 3]] == patch[side_src[second // 3]]
+        flat = np.abs(self._wedge_angles(self.origin, slice(None)) - 180.0) < 1.0
+        self.w = self.w[~(same_patch & flat)]
         self.w_bad0 = self._bad_wedges(self.origin, slice(None))
         # incidence, to re-check only what a changed vertex touches
         nw, nt = len(self.w), len(tris)
-        self.vertex_wedges = sparse.csr_matrix((np.ones(4 * nw, dtype=bool), (self.w.ravel(), np.repeat(np.arange(nw), 4))),
-                                               shape=(n, nw))
-        self.vertex_tris = sparse.csr_matrix((np.ones(3 * nt, dtype=bool), (tris.ravel(), np.repeat(np.arange(nt), 3))),
-                                             shape=(n, nt))
+        self.wedges_of = sparse.csr_matrix((np.ones(4 * nw, dtype=np.float32),
+                                            (np.repeat(np.arange(nw), 4), self.w.ravel())), shape=(nw, n))
+        self.tris_of = sparse.csr_matrix((np.ones(3 * nt, dtype=np.float32),
+                                          (np.repeat(np.arange(nt), 3), tris.ravel())), shape=(nt, n))
 
     def _bad_wedges(self, x, idx):
         """Wedges (interior angle of the grain at a shell edge) outside [min_wedge, 360 - min_wedge]."""
+        phi = self._wedge_angles(x, idx)
+        return (phi < self.config.min_wedge) | (phi > 360.0 - self.config.min_wedge)
+
+    def _wedge_angles(self, x, idx):
         w = self.w[idx]
         a = x[w[:, 0]]
         e = x[w[:, 1]] - a
@@ -197,8 +219,7 @@ class Smoother:
         inward = -_cross(e, d1)                        # into the grain, perpendicular to e
         # angle from p1 towards the grain interior to p2: |inward| = |e| |p1|, so
         # atan2(p2.inward / (|e||p1|), p2.p1 / |p1|) = atan2(p2.inward, p2.p1 |e|)
-        phi = np.degrees(np.arctan2(_dot(p2, inward), _dot(p2, p1) * np.sqrt(ee))) % 360.0
-        return (phi < self.config.min_wedge) | (phi > 360.0 - self.config.min_wedge)
+        return np.degrees(np.arctan2(_dot(p2, inward), _dot(p2, p1) * np.sqrt(ee))) % 360.0
 
     def _normals(self, x, idx=slice(None)):
         t = x[self.model.oriented[idx]]
@@ -221,20 +242,34 @@ class Smoother:
             count = np.bincount(self.cls, minlength=self.n_cls)[:, None]
             step = mean[self.cls] / count[self.cls]
         step = step * self.free
+        moving = _dot(step, step) > (1e-3 * self.config.stop_tolerance * float(self.spacing.min())) ** 2
+        if not moving.any():
+            return x
+        step[~moving] = 0.0
         scale = np.ones(len(x))
         tris = self.model.oriented
-        n_old = self._normals(x)
-        area_old = np.sqrt(_dot(n_old, n_old))
-        was_bad = (_dot(n_old, self.n0) < self.config.min_cos * area_old * self.area0)             | (area_old < self.config.min_area * self.area0)
-        new = self._clamp(x + step)
-        bad_t = self._bad_triangles(new, slice(None), area_old, was_bad)
-        bad_w = self._bad_wedges(new, slice(None)) & ~self.w_bad0
+        nt, nw = len(tris), len(self.w)
+        mv = moving.astype(np.float32)
+        t_mov = np.flatnonzero(self.tris_of @ mv)
+        w_mov = np.flatnonzero(self.wedges_of @ mv)
+        area_old = np.zeros(nt)
+        was_bad = np.zeros(nt, dtype=bool)
+        n_old = self._normals(x, t_mov)
+        area_old[t_mov] = np.sqrt(_dot(n_old, n_old))
+        was_bad[t_mov] = (_dot(n_old, self.n0[t_mov]) < self.config.min_cos * area_old[t_mov] * self.area0[t_mov]) \
+            | (area_old[t_mov] < self.config.min_area * self.area0[t_mov])
+        new = x.copy()
+        new[moving] = self._clamp(x[moving] + step[moving], moving)
+        bad_t = np.zeros(nt, dtype=bool)
+        bad_w = np.zeros(nw, dtype=bool)
+        bad_t[t_mov] = self._bad_triangles(new, t_mov, area_old, was_bad)
+        bad_w[w_mov] = self._bad_wedges(new, w_mov) & ~self.w_bad0[w_mov]
         attempt = 0
         while bad_t.any() or bad_w.any():
             hit = np.zeros(len(x), dtype=bool)
             hit[tris[bad_t].ravel()] = True
             hit[self.w[bad_w].ravel()] = True
-            hit &= scale > 0
+            hit &= moving & (scale > 0)
             if self.n_cls < len(x):                       # all periodic images alike
                 cls_hit = np.zeros(self.n_cls, dtype=bool)
                 cls_hit[self.cls[hit]] = True
@@ -245,8 +280,9 @@ class Smoother:
             scale[hit] = 0.0 if attempt >= self.config.guard_halvings - 1 else scale[hit] * 0.5
             attempt += 1
             new[hit] = self._clamp(x[hit] + step[hit] * scale[hit, None], hit)
-            t_idx = np.flatnonzero(self.vertex_tris[hit].sum(axis=0).A1 > 0)
-            w_idx = np.flatnonzero(self.vertex_wedges[hit].sum(axis=0).A1 > 0)
+            hv = hit.astype(np.float32)
+            t_idx = np.flatnonzero(self.tris_of @ hv)
+            w_idx = np.flatnonzero(self.wedges_of @ hv)
             bad_t[t_idx] = self._bad_triangles(new, t_idx, area_old, was_bad)
             bad_w[w_idx] = self._bad_wedges(new, w_idx) & ~self.w_bad0[w_idx]
         return new
@@ -302,6 +338,9 @@ class Smoother:
         stats['crossings_after'], stats['folded_after'], stats['wedges_after'] = counts
         return x, stats, touched
 
+    def _allowed(self, volume: float) -> float:
+        return max(self.config.volume_tolerance * volume, float(np.prod(self.spacing)))
+
     def _revert_off_volume(self, x, target):
         """Put every grain that is off its volume back on the staircase (all its surface and line
         vertices, with their periodic images), untangle, and repeat while grains are off."""
@@ -310,7 +349,7 @@ class Smoother:
         rounds = 0
         while rounds < self.config.fallback_rounds:
             vol = self._grain_volumes(x)
-            off = [g for g in target if abs(vol[g] - target[g]) > self.config.volume_tolerance * target[g]]
+            off = [g for g in target if abs(vol[g] - target[g]) > self._allowed(target[g])]
             if not off:
                 break
             surfaces = np.unique(np.concatenate([model.shells[g][:, 0] for g in off]))
@@ -344,8 +383,9 @@ class Smoother:
     def _volume_error(self, x, target) -> dict:
         vol = self._grain_volumes(x)
         rel = np.array([(vol[g] - target[g]) / target[g] for g in target])
+        off = sum(abs(vol[g] - target[g]) > self._allowed(target[g]) for g in target)
         return {'max_abs': float(np.abs(rel).max()), 'p90_abs': float(np.percentile(np.abs(rel), 90)),
-                'median': float(np.median(rel))}
+                'median': float(np.median(rel)), 'grains_off_tolerance': int(off)}
 
     def _correct_volume(self, x, target, frozen=None):
         model = self.model

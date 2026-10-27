@@ -29,10 +29,10 @@ def check_rules(model, result, shape, spacing, periodic):
     # anchors fixed, box-face coordinates unchanged
     assert np.array_equal(x[model.points], mesh.points[model.points])
     assert np.array_equal(x[model.box_lock], mesh.points[model.box_lock])
-    # no crossings, no folds, volumes within tolerance
+    # no crossings, no folds, every grain within 1 % or one voxel volume
     assert quality.self_intersections(x, mesh.triangles) == 0
     assert quality.folded_triangles(mesh.points, x, model.oriented) == 0
-    assert result.stats['volume_final']['max_abs'] <= 0.01
+    assert result.stats['volume_final']['grains_off_tolerance'] == 0
     # periodic images still mirror each other
     box = np.array(shape) * np.array(spacing)
     box_tris = mesh.triangles[(mesh.grains < 0).any(axis=1)]
@@ -74,9 +74,17 @@ def test_displacement_limit_and_moving_lines():
     assert d[model.vertex_kind == ON_LINE].max() > 0.1   # the pillar rings are rounded
 
 
-def test_single_voxel_grain_falls_back_to_the_staircase():
+def test_tolerance_is_one_percent_or_one_voxel():
+    # a one-voxel grain may lose up to one voxel volume and is kept smoothed ...
     case = corpus.single_voxel()
     model, result = smoothed(case.labels, (1, 1, 1), case.periodic)
+    assert result.stats['reverted_grains'] == 0
+    assert 0.01 < result.stats['volume_final']['max_abs'] < 1.0
+    # ... but with a tolerance below one voxel it falls back to the staircase, which is exact
+    from dragen.mesh.smoothing import SmoothingConfig, Smoother
+    strict = Smoother(model, (1, 1, 1), SmoothingConfig())
+    strict._allowed = lambda volume: 0.01 * volume
+    result = strict.run()
     assert result.stats['reverted_grains'] == 1
     assert result.stats['volume_final']['max_abs'] < 1e-12
 

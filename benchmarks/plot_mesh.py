@@ -9,6 +9,10 @@ Writes to benchmarks/results/figures/:
     mesh_rve_grain.png             one grain of the generated RVE lognormal 30^3 with its lines
     mesh_kinks.png                 kink angles between neighbouring triangles, staircase vs smoothed
 Surfaces are coloured by grain, junction lines are black, anchors red.
+
+and VTK MultiBlocks for ParaView to benchmarks/results/mesh/model/<name>_staircase.vtm and
+<name>_smoothed.vtm (blocks 'surfaces', 'curves', 'points'; cell data surface, outer, other,
+order, imprinted) for two_contact_patches, ring_triple_line, periodic_imprint and the RVE.
 """
 import os
 import sys
@@ -29,6 +33,7 @@ from dragen.mesh.surface import is_box_face  # noqa: E402
 from dragen.mesh.topology import build_topology  # noqa: E402
 
 OUT = os.path.join(REPO_ROOT, 'benchmarks', 'results', 'figures')
+VTK_OUT = os.path.join(REPO_ROOT, 'benchmarks', 'results', 'mesh', 'model')
 pv.OFF_SCREEN = True
 
 
@@ -76,9 +81,24 @@ def inner_only(model):
     return ~is_box_face(regions[model.topology.patch, 1])
 
 
+def export_vtk(model, smoothed, name):
+    os.makedirs(VTK_OUT, exist_ok=True)
+    for tag, pts in (('staircase', model.mesh.points), ('smoothed', smoothed)):
+        blocks = model.to_pyvista()
+        for key in ('surfaces', 'curves'):
+            blocks[key].points = pts
+        blocks['points'].points = pts[model.points]
+        path = os.path.join(VTK_OUT, f'{name}_{tag}.vtm')
+        blocks.save(path)
+        print(path)
+
+
 def corpus_pictures():
-    for case in (corpus.two_contact_patches(), corpus.ring_triple_line()):
+    for case in (corpus.two_contact_patches(), corpus.ring_triple_line(), corpus.periodic_imprint()):
         model, x = prepare(case.labels, (1, 1, 1), case.periodic)
+        export_vtk(model, x, case.name)
+        if case.name == 'periodic_imprint':
+            continue
         keep = inner_only(model)
         lines = [ln for ln in model.curves if all(r > 0 for r in ln.regions)]
         side_by_side(model, x, keep, lines, os.path.join(OUT, f'mesh_{case.name}.png'))
@@ -89,6 +109,7 @@ def rve_pictures(tag='lognormal_box15_res2_seed1'):
     labels = np.load(os.path.join(src, 'labels.npz'))['labels']
     box = RveConfig.load(os.path.join(src, 'config.yaml')).box
     model, x = prepare(labels, box.spacing, box.periodic)
+    export_vtk(model, x, tag)
     # a grain that does not touch the box, as large as possible
     regions = np.array([s.regions for s in model.surfaces])
     touches_box = {int(g) for g, o in regions if is_box_face(o)}

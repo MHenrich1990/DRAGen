@@ -17,7 +17,8 @@ Surface checks, per grain, on the triangles of an InterfaceMesh oriented outward
 
 Interface checks: duplicate triangles, degenerate triangles, triangles with the same grain on
 both sides, triangles facing a GAP (non-conforming neighbours), smallest angle and radius ratio,
-pairwise self-intersections.
+pairwise self-intersections. For smoothed meshes (M3): kink angle between neighbouring triangles
+of a patch, triangles folded against their staircase position.
 
 Volume checks: inverted elements (det J <= 0 at a check point), scaled Jacobian, Jacobian ratio,
 dihedral angles and radius ratio of tetrahedra, faces used once that do not lie on the box
@@ -183,6 +184,32 @@ def interface_patches(mesh: InterfaceMesh) -> Dict[tuple, int]:
     return {(int(g1), int(g2)): int(n) for (g1, g2), n in zip(keys, counts)}
 
 
+def surface_kinks(points: np.ndarray, triangles: np.ndarray, patch: np.ndarray) -> np.ndarray:
+    """Angle in degrees between the normals of every two triangles that share an edge inside the
+    same patch (0 = flat; the staircase has 0 and 90). Triangles must be consistently oriented
+    within a patch."""
+    t = points[triangles]
+    n = np.cross(t[:, 1] - t[:, 0], t[:, 2] - t[:, 0])
+    n /= np.maximum(np.linalg.norm(n, axis=1), 1e-300)[:, None]
+    tri = np.repeat(np.arange(len(triangles)), 3)
+    u, v = triangles.ravel(), triangles[:, [1, 2, 0]].ravel()
+    key = unique_pairs(np.minimum(u, v), np.maximum(u, v), return_inverse=True)[1]
+    order = np.argsort(key, kind='stable')
+    same = key[order[1:]] == key[order[:-1]]
+    i, j = tri[order[:-1]][same], tri[order[1:]][same]
+    keep = patch[i] == patch[j]
+    cos = np.einsum('ij,ij->i', n[i[keep]], n[j[keep]])
+    return np.degrees(np.arccos(np.clip(cos, -1, 1)))
+
+
+def folded_triangles(reference: np.ndarray, points: np.ndarray, triangles: np.ndarray) -> int:
+    """Triangles whose normal turned by 90 degrees or more against the reference positions."""
+    def normals(x):
+        t = x[triangles]
+        return np.cross(t[:, 1] - t[:, 0], t[:, 2] - t[:, 0])
+    return int(np.count_nonzero(np.einsum('ij,ij->i', normals(points), normals(reference)) <= 0))
+
+
 def triangle_quality(points: np.ndarray, triangles: np.ndarray) -> Dict[str, np.ndarray]:
     """Smallest angle (degrees), radius ratio 2 r_in / r_circ (1 = equilateral) and area per triangle."""
     p = points[triangles]
@@ -209,12 +236,28 @@ def self_intersections(points: np.ndarray, triangles: np.ndarray, tol: float = 1
     (Moeller-Trumbore). Coplanar overlaps are not detected; exact duplicates are counted by
     `interface_report` instead.
     """
+    return len(self_intersection_pairs(points, triangles, tol=tol))
+
+
+def self_intersection_pairs(points: np.ndarray, triangles: np.ndarray, candidates: np.ndarray = None,
+                            tol: float = 1e-9) -> np.ndarray:
+    """The crossing pairs (k, 2) of `self_intersections`; with `candidates` (triangle indices)
+    only pairs that involve at least one candidate are tested."""
     p = points[triangles]
     centre = p.mean(axis=1)
     radius = np.linalg.norm(p - centre[:, None], axis=2).max(axis=1)
-    pairs = cKDTree(centre).query_pairs(2 * radius.max(), output_type='ndarray')
+    tree = cKDTree(centre)
+    if candidates is None:
+        pairs = tree.query_pairs(2 * radius.max(), output_type='ndarray')
+    else:
+        candidates = np.unique(np.asarray(candidates, dtype=np.int64))
+        near = tree.query_ball_point(centre[candidates], 2 * radius.max())
+        rows = np.repeat(candidates, [len(n) for n in near])
+        cols = np.concatenate([np.asarray(n, dtype=np.int64) for n in near]) if len(near) else np.zeros(0, np.int64)
+        pairs = np.unique(np.sort(np.column_stack([rows, cols]), axis=1), axis=0)
+        pairs = pairs[pairs[:, 0] != pairs[:, 1]]
     if len(pairs) == 0:
-        return 0
+        return np.zeros((0, 2), dtype=np.int64)
     i, j = pairs[:, 0], pairs[:, 1]
     near = np.linalg.norm(centre[i] - centre[j], axis=1) <= radius[i] + radius[j]
     i, j = i[near], j[near]
@@ -224,7 +267,7 @@ def self_intersections(points: np.ndarray, triangles: np.ndarray, tol: float = 1
     for a, b in ((i, j), (j, i)):
         for k in range(3):
             hit |= _segment_hits_triangle(p[a, k], p[a, (k + 1) % 3], p[b], tol)
-    return int(np.count_nonzero(hit))
+    return np.column_stack([i[hit], j[hit]])
 
 
 def _segment_hits_triangle(s0, s1, tri, tol):

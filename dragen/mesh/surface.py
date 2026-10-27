@@ -14,7 +14,7 @@ the quality metrics (its grain volumes equal the voxel volumes) and the starting
 smoothing in M2/M3.
 """
 from dataclasses import dataclass
-from typing import Sequence
+from typing import Optional, Sequence
 
 import numpy as np
 
@@ -41,6 +41,8 @@ class InterfaceMesh:
     """(F, 3) point indices."""
     grains: np.ndarray
     """(F, 2) regions on both sides; the normal points out of grains[:, 0]."""
+    corner: Optional[np.ndarray] = None
+    """(P, 3) voxel corner index of every point, for meshes built on the voxel lattice."""
 
     def grain_ids(self) -> np.ndarray:
         g = np.unique(self.grains)
@@ -102,10 +104,11 @@ def staircase_mesh(labels: np.ndarray, spacing: Sequence[float]) -> InterfaceMes
     sides = np.concatenate(sides)
     used, inverse = np.unique(quads, return_inverse=True)
     quads = inverse.reshape(-1, 4)
-    points = np.stack(np.unravel_index(used, corner_shape), axis=1) * np.asarray(spacing, dtype=float)
+    corner = np.stack(np.unravel_index(used, corner_shape), axis=1)
     triangles = np.concatenate([quads[:, [0, 1, 2]], quads[:, [0, 2, 3]]])
     grains = np.concatenate([sides, sides])
-    return InterfaceMesh(points=points, triangles=triangles, grains=grains)
+    return InterfaceMesh(points=corner * np.asarray(spacing, dtype=float), triangles=triangles,
+                         grains=grains, corner=corner)
 
 
 def corner_grain_counts(labels: np.ndarray, periodic: Sequence[bool]) -> np.ndarray:
@@ -115,6 +118,9 @@ def corner_grain_counts(labels: np.ndarray, periodic: Sequence[bool]) -> np.ndar
     boundary sees the voxels on both sides; on an open axis only those inside the box. This is
     the node classification of the meshing concept: 2 = boundary face, 3 = triple line,
     >= 4 = quadruple point (Section 9.2 of the process notes).
+
+    Only grains are counted here. The topology (dragen.mesh.topology) counts the box faces as
+    virtual grains as well and does not look across periodic boundaries.
     """
     labels = np.asarray(labels).astype(np.int64)
     padded = labels

@@ -50,6 +50,31 @@ def _group(*cols) -> np.ndarray:
     return ids
 
 
+def unique_pairs(a, b, return_inverse: bool = False, return_counts: bool = False):
+    """np.unique over the rows (a, b) of two integer columns.
+
+    Encodes each row in one int64 key and sorts once; several times faster than
+    np.unique(..., axis=0), which sorts rows as structured records. Returns the unique rows
+    (n, 2), then the inverse and the counts if asked for.
+    """
+    a = np.asarray(a, dtype=np.int64).ravel()
+    b = np.asarray(b, dtype=np.int64).ravel()
+    if not len(a):
+        rows = np.zeros((0, 2), dtype=np.int64)
+        extra = [np.zeros(0, dtype=np.int64)] * (return_inverse + return_counts)
+        return (rows, *extra) if extra else rows
+    a0, b0 = a.min(), b.min()
+    span = int(b.max() - b0) + 1
+    if (int(a.max() - a0) + 1) * span >= 2 ** 62:
+        raise OverflowError('pair values too large to encode')
+    out = np.unique((a - a0) * span + (b - b0), return_inverse=return_inverse, return_counts=return_counts)
+    keys = out[0] if isinstance(out, tuple) else out
+    rows = np.column_stack([keys // span + a0, keys % span + b0])
+    if isinstance(out, tuple):
+        return (rows, *[o.ravel() for o in out[1:]])
+    return rows
+
+
 def _components(n: int, a: np.ndarray, b: np.ndarray) -> np.ndarray:
     graph = sparse.coo_matrix((np.ones(len(a), dtype=np.int8), (a, b)), shape=(n, n))
     return connected_components(graph, directed=False)[1]
@@ -92,16 +117,15 @@ def grain_surfaces(mesh: InterfaceMesh) -> pd.DataFrame:
     corner_vertex = tris.ravel()
     corner_grain = np.repeat(grain, 3)
     gv = _group(corner_grain, corner_vertex)
-    fans_per_gv = np.bincount(np.unique(np.stack([gv, fan]), axis=1)[0])
+    fans_per_gv = np.bincount(unique_pairs(gv, fan)[:, 0])
     gv_grain = np.zeros(len(fans_per_gv), dtype=np.int64)
     gv_grain[gv] = corner_grain
 
     # Euler characteristic per connected piece
     n_comp = component.max() + 1 if s else 0
     faces = np.bincount(component, minlength=n_comp)
-    edges = np.bincount(np.unique(np.stack([component[t], edge]), axis=1)[0], minlength=n_comp)
-    verts = np.bincount(np.unique(np.stack([np.repeat(component, 3), corner_vertex]), axis=1)[0],
-                        minlength=n_comp)
+    edges = np.bincount(unique_pairs(component[t], edge)[:, 0], minlength=n_comp)
+    verts = np.bincount(unique_pairs(np.repeat(component, 3), corner_vertex)[:, 0], minlength=n_comp)
     euler = verts - edges + faces
     comp_grain = np.zeros(n_comp, dtype=np.int64)
     comp_grain[component] = grain
@@ -338,8 +362,8 @@ def _bodies_per_grain(mesh, faces, owner, lower, upper, periodic_axes, tol):
         b = np.concatenate([b, owner[hi[idx[found]]]])
     same = mesh.grain[a] == mesh.grain[b]
     body = _components(len(mesh.cells), a[same], b[same])
-    pairs = np.unique(np.stack([mesh.grain, body]), axis=1)
-    return np.unique(pairs[0], return_counts=True)[1]
+    pairs = unique_pairs(mesh.grain, body)
+    return np.unique(pairs[:, 0], return_counts=True)[1]
 
 
 def _midside_mismatch(mesh):
@@ -349,7 +373,7 @@ def _midside_mismatch(mesh):
     lo = corners.min(axis=2).ravel()
     hi = corners.max(axis=2).ravel()
     edge = _group(lo, hi)
-    variants = np.unique(np.stack([edge, mid]), axis=1)[0]
+    variants = unique_pairs(edge, mid)[:, 0]
     return int(np.count_nonzero(np.bincount(variants) > 1))
 
 

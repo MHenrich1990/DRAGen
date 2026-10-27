@@ -206,3 +206,12 @@ def test_grain_across_periodic_boundary_is_one_body():
     periodic = quality.volume_report(hexes, (0, 0, 0), (8, 4, 4), periodic_axes=(0, 1, 2))
     assert open_box['grains_with_several_bodies'] == 1
     assert periodic['grains_with_several_bodies'] == 0
+
+
+def test_box_faces_of_periodic_hex_mesh_mirror_each_other():
+    case = corpus.fragmented_grain(periodic=True)
+    hexes = voxel_hex_mesh(case.labels, (1, 1, 1))
+    boundary = grain_boundary_mesh(hexes, (0, 0, 0), (8, 4, 4))
+    box_tris = boundary.triangles[(boundary.grains < 0).any(axis=1)]
+    result = quality.periodic_mismatch(boundary.points, box_tris, (0, 0, 0), (8, 4, 4), axes=(0, 1, 2))
+    assert all(r['unmatched_nodes'] == 0 and r['unmatched_facets'] == 0 for r in result.values())

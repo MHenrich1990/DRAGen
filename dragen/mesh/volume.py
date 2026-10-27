@@ -138,6 +138,10 @@ def grain_boundary_mesh(mesh: VolumeMesh, box_lower, box_upper, tol: float = 1e-
     faces = nodes[first[keep]]
     pair = np.column_stack([grain[keep], region[keep]])
     if faces.shape[1] == 4:
+        # split along the diagonal through the corner with the smallest coordinate sum, so that
+        # mirrored quads on opposite box faces are split the same way
+        start = np.argmin(mesh.points[faces].sum(axis=2), axis=1)
+        faces = np.take_along_axis(faces, (start[:, None] + np.arange(4)) % 4, axis=1)
         faces = np.concatenate([faces[:, [0, 1, 2]], faces[:, [0, 2, 3]]])
         pair = np.concatenate([pair, pair])
     used, inverse = np.unique(faces, return_inverse=True)

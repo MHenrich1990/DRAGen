@@ -56,7 +56,8 @@ class TetMeshConfig:
     """Largest element size in voxel edges (None: only limited by the distance to the surfaces)."""
     order: int = 2
     optimize: str = 'Netgen'
-    """Extra gmsh optimizer run after meshing ('' none, 'Netgen', 'Relocate3D', ...). Netgen splits
+    """Extra gmsh optimizer runs after meshing, comma separated ('' none, 'Netgen', 'Relocate3D',
+    'Gmsh', ...). Netgen splits
     the slivers spanning two boundary triangles (smallest dihedral angle at 100^3: 0.04 -> 0.58
     degrees, p1 8.8 -> 13.3) for about three times the meshing time (process notes 7.12)."""
     algorithm: int = 1
@@ -128,8 +129,7 @@ def tet_mesh(model: SurfaceModel, points: np.ndarray, spacing: Sequence[float],
         stats['seconds']['entities'] = time.perf_counter() - t
         t = time.perf_counter()
         gmsh.model.mesh.generate(3)
-        if config.optimize:
-            gmsh.model.mesh.optimize(config.optimize)
+        _optimize(gmsh, config)
         stats['seconds']['generate'] = time.perf_counter() - t
         t = time.perf_counter()
         if config.order > 1:
@@ -141,6 +141,12 @@ def tet_mesh(model: SurfaceModel, points: np.ndarray, spacing: Sequence[float],
     stats['bodies'] = len(bodies)
     stats['cavities'] = sum(len(b.shells) - 1 for b in bodies)
     return TetMeshResult(mesh=mesh, body=body, bodies=bodies, stats=stats)
+
+
+def _optimize(gmsh, config: TetMeshConfig) -> None:
+    for method in config.optimize.split(','):
+        if method:
+            gmsh.model.mesh.optimize(method)
 
 
 def periodic_node_pairs(points: np.ndarray, box_upper: Sequence[float], axes: Sequence[int],

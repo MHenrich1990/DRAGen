@@ -1,18 +1,20 @@
-"""Volume meshing (M4) of the RVEs of the reworked generator.
+"""Volume meshing (M4, M4a) of the RVEs of the reworked generator.
 
-For every benchmarks/results/rework/<tag>/labels.npz: clean-up, topology, surface model and
-smoothing as in topology_benchmark.py, then the gmsh tet mesh (dragen.mesh.tetmesh), judged with
-dragen.mesh.quality: inverted elements, gaps and overused faces, midside nodes, element quality
-(scaled Jacobian, dihedral angles, radius ratio), element volume per grain against the voxel
-volume, grain boundary faces of the tet mesh against the smoothed triangles, periodic node pairs
-(corner and midside nodes) and facets on opposite box faces.
+For every benchmarks/results/rework/<tag>/labels.npz the whole pipeline of dragen.mesh.mesher:
+clean-up, topology, surface model, smoothing, adaptive remeshing of the grain boundaries (skipped
+with --no-remesh, the state of commit 7d1c47d) and the gmsh tet mesh with feedback, judged with
+dragen.mesh.tetmesh.check: inverted elements, gaps and overused faces, midside nodes, element
+quality (scaled Jacobian, dihedral angles, radius ratio), element volume per grain against the
+voxel volume and against the volume enclosed by the final surface, grain boundary faces of the tet
+mesh against the surface triangles, periodic node pairs (corner and midside nodes) and facets on
+opposite box faces; for the remeshed surface also dragen.mesh.remeshing.check.
 
 Example:
     venv/Scripts/python benchmarks/tetmesh_benchmark.py                        # all stored RVEs
-    venv/Scripts/python benchmarks/tetmesh_benchmark.py --tag lognormal_box30_res2_seed1 --growth 0.3
+    venv/Scripts/python benchmarks/tetmesh_benchmark.py --tag lognormal_box30_res2_seed1 --variant smoothed --no-remesh
 
 Results: benchmarks/results/mesh/tetmesh/<variant>/<tag>/result.json and <variant>/summary.csv;
-<variant> is 'default' unless --variant is given.
+<variant> is 'remeshed' unless --variant is given ('default' holds the run on 7d1c47d).
 """
 import argparse
 import glob
@@ -29,38 +31,41 @@ sys.path.insert(0, os.path.dirname(__file__))
 
 from rework_benchmark import code_state  # noqa: E402
 from dragen.config import RveConfig  # noqa: E402
-from dragen.mesh.cleanup import ManifoldCleaner  # noqa: E402
-from dragen.mesh.model import build_model  # noqa: E402
-from dragen.mesh.smoothing import smooth  # noqa: E402
-from dragen.mesh.tetmesh import TetMeshConfig, check, tet_mesh  # noqa: E402
-from dragen.mesh.topology import build_topology  # noqa: E402
+from dragen.mesh import remeshing  # noqa: E402
+from dragen.mesh.mesher import MeshConfig, mesh_rve  # noqa: E402
+from dragen.mesh.remeshing import RemeshConfig, RemeshResult  # noqa: E402
+from dragen.mesh.tetmesh import TetMeshConfig, check  # noqa: E402
 
 SOURCE_DIR = os.path.join(REPO_ROOT, 'benchmarks', 'results', 'rework')
 RESULT_DIR = os.path.join(REPO_ROOT, 'benchmarks', 'results', 'mesh', 'tetmesh')
 
 
-def run(tag: str, config: TetMeshConfig) -> dict:
+def run(tag: str, config: MeshConfig) -> dict:
     src = os.path.join(SOURCE_DIR, tag)
     labels = np.load(os.path.join(src, 'labels.npz'))['labels']
     box = RveConfig.load(os.path.join(src, 'config.yaml')).box
     periodic, spacing = tuple(box.periodic), tuple(box.spacing)
-    out = {'tag': tag, 'code': code_state(), 'config': vars(config), 'shape': list(labels.shape),
-           'spacing': list(spacing), 'periodic': list(periodic), 'n_grains': int(labels.max()),
-           'seconds': {}}
+    out = {'tag': tag, 'code': code_state(), 'shape': list(labels.shape),
+           'config': {'tetmesh': vars(config.tetmesh),
+                      'remeshing': vars(config.remeshing) if config.remeshing else None,
+                      'min_dihedral': config.min_dihedral, 'feedback_rounds': config.feedback_rounds},
+           'spacing': list(spacing), 'periodic': list(periodic), 'n_grains': int(labels.max())}
     t = time.perf_counter()
-    cleaned, _ = ManifoldCleaner(periodic).run(labels)
-    model = build_model(build_topology(cleaned, spacing, periodic))
-    smoothed = smooth(model, spacing)
-    out['seconds']['surface'] = time.perf_counter() - t
-
+    result = mesh_rve(labels, spacing, periodic, config)
+    out['seconds'] = dict(result.stats['seconds'], total=time.perf_counter() - t)
+    out['seconds'].update({f'tetmesh_{k}': v for k, v in result.tets.stats.pop('seconds').items()})
+    out['tetmesh'] = result.tets.stats
+    out['feedback'] = result.stats['feedback']
+    out['staircase_triangles'] = int(len(result.staircase.oriented))
+    if config.remeshing is not None:
+        rem = result.stats['remeshing']
+        out['remeshing'] = {k: rem[k] for k in ('passes', 'refused', 'volume_before_correction', 'volume_final',
+                                                 'triangles_before', 'triangles_after')}
+        out['remeshing']['check'] = remeshing.check(result.staircase, RemeshResult(result.surface, result.points),
+                                                    spacing)
     t = time.perf_counter()
-    result = tet_mesh(model, smoothed.points, spacing, config)
-    out['seconds']['tetmesh'] = time.perf_counter() - t
-    out['seconds'].update({f'tetmesh_{k}': v for k, v in result.stats.pop('seconds').items()})
-    out['tetmesh'] = result.stats
-    t = time.perf_counter()
-    out['quality'] = check(model, smoothed.points, result.mesh, labels.shape, spacing, periodic,
-                           smoothed.grain_volume_target)
+    out['quality'] = check(result.surface, result.points, result.tets.mesh, labels.shape, spacing, periodic,
+                           result.smoothed.grain_volume_target)
     out['seconds']['checks'] = time.perf_counter() - t
     return out
 
@@ -68,14 +73,16 @@ def run(tag: str, config: TetMeshConfig) -> dict:
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--tag', nargs='*', default=None)
-    parser.add_argument('--variant', default='default')
+    parser.add_argument('--variant', default='remeshed')
+    parser.add_argument('--no-remesh', action='store_true')
     parser.add_argument('--growth', type=float, default=TetMeshConfig.growth)
     parser.add_argument('--max-size', type=float, default=None)
     parser.add_argument('--optimize', default=TetMeshConfig.optimize)
     parser.add_argument('--algorithm', type=int, default=TetMeshConfig.algorithm)
     args = parser.parse_args()
-    config = TetMeshConfig(growth=args.growth, max_size=args.max_size, optimize=args.optimize,
-                           algorithm=args.algorithm)
+    config = MeshConfig(tetmesh=TetMeshConfig(growth=args.growth, max_size=args.max_size, optimize=args.optimize,
+                                              algorithm=args.algorithm),
+                        remeshing=None if args.no_remesh else RemeshConfig())
     tags = args.tag or sorted(os.path.basename(os.path.dirname(p))
                               for p in glob.glob(os.path.join(SOURCE_DIR, '*', 'labels.npz')))
     rows = []
@@ -86,7 +93,12 @@ def main():
         with open(os.path.join(out_dir, 'result.json'), 'w') as f:
             json.dump(result, f, indent=2)
         q = result['quality']
+        fb = result['feedback']
         row = {'tag': tag, 'voxels': int(np.prod(result['shape'])), 'grains': result['n_grains'],
+               'staircase_triangles': result['staircase_triangles'], 'triangles': fb[-1]['triangles'],
+               'feedback_rounds': len(fb) - 1, 'below_5deg_first': fb[0]['below_min_dihedral'],
+               'below_5deg': fb[-1]['below_min_dihedral'],
+               'volume_vs_surface_max_abs': q['volume_vs_surface']['max_abs'],
                'bodies': result['tetmesh']['bodies'], 'cavities': result['tetmesh']['cavities'],
                'elements': q['n_elements'], 'nodes': q['n_points'], 'elements_per_voxel': q['elements_per_voxel'],
                'inverted': q['inverted_elements'], 'open_inner_faces': q['open_inner_faces'],

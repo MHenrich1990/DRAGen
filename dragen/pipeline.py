@@ -1,10 +1,13 @@
-"""Generation pipeline: grain sampling -> RSA (bands first) -> tessellation -> repair -> inclusions.
+"""Generation pipeline: grain sampling -> RSA (bands first) -> tessellation -> repair -> band
+merge -> inclusions.
 
 Solver export follows in a later phase (E1).
 
 Volume bookkeeping: band grains hold `filling` times the volume of their band slab; the matrix
 phases share the rest of the box according to their fractions. Matrix grains are not seeded
-inside a band. Inclusions are cut out of the grains after tessellation, their volume fraction
+inside a band. After the tessellation all grains of a band are merged into one grain (author's
+decision 29.10.2026): the band keeps the rough, interlocked boundary its grains grew, but it is a
+single grain with one orientation for the later stages. Inclusions are cut out of the grains after tessellation, their volume fraction
 refers to the whole box. An inclusion only fits into a grain that can hold it together with its
 shell; inclusions that fit nowhere are left out and logged.
 """
@@ -31,13 +34,16 @@ from dragen.stages.tessellation import TessellationStats, Tessellator
 @dataclass
 class RveResult:
     labels: np.ndarray
-    """Grain ID per voxel; grain i of `grains` has ID i + 1. Band grains come first, then the
-    matrix grains, then the inclusions (phase INCLUSIONS)."""
+    """Grain ID per voxel; grain i of `grains` has ID i + 1. Band k is grain k + 1 (its grains
+    merged), then band grains detached from their band, the matrix grains, the inclusions (phase
+    INCLUSIONS)."""
     grains: GrainTable
     domain: VoxelDomain
     target_voxels: np.ndarray
     """Discrete target volume per grain (voxels of the unshrunk ellipsoid)."""
     bands: List[Band] = field(default_factory=list)
+    band_grains: List[dict] = field(default_factory=list)
+    """Per band the number of grains merged into it and of band grains left detached."""
     seconds: Dict[str, float] = field(default_factory=dict)
     tessellation: TessellationStats = None
     inclusions: InclusionStats = None
@@ -147,6 +153,9 @@ def generate(config: RveConfig) -> RveResult:
 
     grains = grains.with_centers(centers)
     targets = [k.target_voxels for k in kernels]
+    band_grains = []
+    if bands:
+        labels, grains, targets, band_grains = merge_bands(labels, grains, targets, bands, domain)
     inclusion_stats = None
     if config.inclusions.fraction > 0:
         t = time.perf_counter()
@@ -167,8 +176,70 @@ def generate(config: RveConfig) -> RveResult:
         seconds['inclusions'] = time.perf_counter() - t
 
     return RveResult(labels=labels, grains=grains, domain=domain, target_voxels=np.array(targets),
-                     bands=bands, seconds=seconds, tessellation=tessellator.stats,
+                     bands=bands, band_grains=band_grains, seconds=seconds, tessellation=tessellator.stats,
                      inclusions=inclusion_stats, rsa_attempts=placer.attempts, repaired_voxels=repaired)
+
+
+def merge_bands(labels: np.ndarray, grains: GrainTable, target_voxels: List[int], bands: List[Band],
+                domain: VoxelDomain):
+    """Merges the grains of band k into grain k + 1. Only the grains of the largest connected piece
+    of the band (across periodic boundaries) are merged; a band grain without contact to it stays
+    a grain of its own (band phase and index, own orientation), so phase fractions do not change
+    and every grain stays one body. Order of the IDs: merged bands, detached band grains, matrix
+    grains.
+
+    The row of a band in the grain table describes the merged grain: radii of the sphere with the
+    summed volume of its grains, the orientation of its first grain, its phase, the centre of the
+    slab. Its target is the sum of its grains' targets. Returns labels, grains, targets and per
+    band the number of merged and of detached grains.
+    """
+    from dragen.analysis.metrics import component_labels
+    n_bands = len(bands)
+    band = grains.band
+    n = len(grains)
+    flat = labels.ravel()
+    # the piece of the band union every band grain lies in (a grain is one body after the repair)
+    owner = np.where(flat > 0, np.concatenate([[-1], band])[np.clip(flat, 0, n)], -1)
+    band_labels = np.where(owner >= 0, owner + 1, 0).reshape(labels.shape)
+    piece = component_labels(band_labels, domain.periodic)
+    merged = np.zeros(n, dtype=bool)
+    for k in range(n_bands):
+        mine = np.flatnonzero(owner == k)
+        if not len(mine):
+            continue
+        pieces, size = np.unique(piece[mine], return_counts=True)
+        main = pieces[np.argmax(size)]
+        grains_in_main = np.unique(flat[mine[piece[mine] == main]]) - 1
+        merged[grains_in_main] = True
+    detached = np.flatnonzero((band >= 0) & ~merged)
+    matrix = np.flatnonzero(band < 0)
+
+    new_id = np.zeros(n + 1, dtype=labels.dtype)
+    new_id[1:][merged] = band[merged] + 1
+    new_id[1:][detached] = n_bands + 1 + np.arange(len(detached))
+    new_id[1:][matrix] = n_bands + len(detached) + 1 + np.arange(len(matrix))
+    labels = new_id[labels]
+
+    volume = np.bincount(band[merged], weights=grains.volume[merged], minlength=n_bands)
+    first = np.array([np.flatnonzero(merged & (band == k))[0] for k in range(n_bands)])
+    if domain.ndim == 3:
+        r = (3 * volume / (4 * np.pi)) ** (1 / 3)
+    else:
+        r = np.sqrt(volume / np.pi)
+    centre = np.tile((np.asarray(domain.shape) // 2).astype(float), (n_bands, 1))
+    for k, b in enumerate(bands):
+        centre[k, b.axis] = np.floor(b.center / domain.spacing[b.axis])
+    band_rows = GrainTable(radii=np.repeat(r[:, None], domain.ndim, axis=1), alpha=np.zeros(n_bands),
+                           euler=grains.euler[first], phase=grains.phase[first], band=np.arange(n_bands),
+                           centers=centre.astype(grains.centers.dtype))
+    grains_out = GrainTable.concat([band_rows, grains.take(detached), grains.take(matrix)])
+    targets = np.asarray(target_voxels)
+    band_targets = np.bincount(band[merged], weights=targets[merged], minlength=n_bands)
+    targets = list(np.round(band_targets).astype(int)) + list(targets[detached]) + list(targets[matrix])
+    counts = {'merged': np.bincount(band[merged], minlength=n_bands),
+              'detached': np.bincount(band[detached], minlength=n_bands)}
+    stats = [{'merged': int(counts['merged'][k]), 'detached': int(counts['detached'][k])} for k in range(n_bands)]
+    return labels, grains_out, targets, stats
 
 
 def expected_phase_fractions(config: RveConfig, bands: List[Band], domain: VoxelDomain) -> Dict[int, float]:

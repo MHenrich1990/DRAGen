@@ -90,3 +90,37 @@ def test_inclusion_does_not_cut_off_voxels_attached_only_through_it():
     before = components_per_grain(labels, (True,) * 3)[1]
     InclusionPlacer(dom, np.random.default_rng(0), max_attempts=500).place(labels, [kernel], first_id=5000)
     assert components_per_grain(labels, (True,) * 3)[1] == before == 1
+
+
+def test_band_grains_are_merged_into_one_grain_per_band():
+    from dragen.core.grains import GrainTable
+    from dragen.pipeline import merge_bands
+    dom = VoxelDomain(shape=(6, 6, 6), spacing=(1.0, 1.0, 1.0), periodic=(True, True, True))
+    labels = np.array([1, 2, 3, 4, 5, 0] * 36, dtype=np.int32).reshape(6, 6, 6)
+    grains = GrainTable(radii=np.ones((5, 3)), alpha=np.zeros(5), euler=np.arange(15.0).reshape(5, 3),
+                        phase=np.array([2, 2, 2, 1, 1]), band=np.array([0, 0, 1, -1, -1]),
+                        centers=np.zeros((5, 3), dtype=int))
+    bands = [Band(axis=2, center=1.0, thickness=1.0), Band(axis=2, center=4.0, thickness=1.0)]
+    new, table, targets, merged = merge_bands(labels, grains, [10, 20, 30, 40, 50], bands, dom)
+    # band 0 = old grains 1 and 2, band 1 = old grain 3, matrix grains 4, 5 -> 3, 4
+    assert np.array_equal(np.unique(new), [0, 1, 2, 3, 4])
+    assert np.array_equal(new.ravel()[:6], [1, 1, 2, 3, 4, 0])
+    assert merged == [{'merged': 2, 'detached': 0}, {'merged': 1, 'detached': 0}] and targets == [30, 30, 40, 50]
+    assert np.array_equal(table.band, [0, 1, -1, -1]) and np.array_equal(table.phase, [2, 2, 1, 1])
+    assert np.allclose(table.volume[:2], [2 * grains.volume[0], grains.volume[2]])
+    assert np.array_equal(table.euler[0], grains.euler[0])
+
+
+def test_band_grain_without_contact_stays_a_grain():
+    from dragen.core.grains import GrainTable
+    from dragen.pipeline import merge_bands
+    dom = VoxelDomain(shape=(8, 1, 1), spacing=(1.0, 1.0, 1.0), periodic=(False, False, False))
+    # band grains 1, 2 touch, band grain 3 is separated from them by matrix grain 4
+    labels = np.array([1, 1, 2, 2, 4, 3, 4, 4], dtype=np.int32).reshape(8, 1, 1)
+    grains = GrainTable(radii=np.ones((4, 3)), alpha=np.zeros(4), euler=np.zeros((4, 3)),
+                        phase=np.array([2, 2, 2, 1]), band=np.array([0, 0, 0, -1]),
+                        centers=np.zeros((4, 3), dtype=int))
+    new, table, targets, stats = merge_bands(labels, grains, [2, 2, 1, 3], [Band(axis=2, center=0.5, thickness=1.0)], dom)
+    assert new.ravel().tolist() == [1, 1, 1, 1, 3, 2, 3, 3]
+    assert stats == [{'merged': 2, 'detached': 1}]
+    assert table.band.tolist() == [0, 0, -1] and targets == [4, 1, 3]

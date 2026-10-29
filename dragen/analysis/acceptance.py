@@ -87,6 +87,8 @@ def feature_violations(bands: List[dict], inclusions: dict, band_filling: float,
             out.append(f"band {b['band']}: filling {b['filling']:.3f}, target {band_filling:.3f}")
         if b['outside_fraction'] > limits.max_band_outside_fraction:
             out.append(f"band {b['band']}: {b['outside_fraction']:.1%} of its grain volume lies outside the band")
+        if b.get('pieces', 1) != 1:
+            out.append(f"band {b['band']}: the band grain consists of {b['pieces']} pieces")
     if inclusion_fraction > 0 and inclusions['placed']:
         if inclusions['touching_boundary']:
             out.append(f"{inclusions['touching_boundary']} inclusions touch a grain boundary or another inclusion")

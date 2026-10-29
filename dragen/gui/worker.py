@@ -70,7 +70,7 @@ def generate_job(job_dir: Path) -> None:
     phase = np.concatenate([[0], result.grains.phase])
     rep = metrics.report(result.labels, target, phase, result.domain.voxel_volume, config.box.periodic)
     target_ratio = expected_phase_fractions(config, result.bands, result.domain)
-    bands = band_report(result.labels, result.grains, result.bands, result.domain)
+    bands = band_report(result.labels, result.grains, result.bands, result.domain, result.band_grains)
     requested = None if result.inclusions is None else result.inclusions.placed + result.inclusions.not_placed
     inclusions = inclusion_report(result.labels, result.grains, result.domain, requested)
     stats = result.tessellation

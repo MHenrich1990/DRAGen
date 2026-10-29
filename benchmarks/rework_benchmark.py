@@ -83,7 +83,7 @@ def run(case: str, box: float, resolution: float, seed: int, out_dir: str = None
     stats = result.tessellation
     n = result.labels.size
     target_ratio = expected_phase_fractions(config, result.bands, result.domain)
-    bands = band_report(result.labels, result.grains, result.bands, result.domain)
+    bands = band_report(result.labels, result.grains, result.bands, result.domain, result.band_grains)
     requested = None if result.inclusions is None else result.inclusions.placed + result.inclusions.not_placed
     inclusions = inclusion_report(result.labels, result.grains, result.domain, requested)
 

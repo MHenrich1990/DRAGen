@@ -67,6 +67,6 @@ def test_rework_with_bands_and_inclusions(seed, small_inclusions):
     assert rep.fill_ratio == 1.0
     assert rep.fragmented_grains == 0
     assert result.repaired_voxels == 0
-    bands = band_report(result.labels, result.grains, result.bands, result.domain)
+    bands = band_report(result.labels, result.grains, result.bands, result.domain, result.band_grains)
     inclusions = inclusion_report(result.labels, result.grains, result.domain)
     assert feature_violations(bands, inclusions, 0.5, 0.01) == []

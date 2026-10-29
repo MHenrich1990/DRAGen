@@ -353,14 +353,27 @@ class Remesher:
     def refine_near(self, centres: np.ndarray, iterations: int = 4) -> RemeshResult:
         """Halves the size field (down to h_min) within 2 h of the given points, e.g. the centres
         of poor tetrahedra, and continues remeshing for a few iterations."""
-        if len(centres):
-            near = self.ref_vertex_tree.query_ball_point(centres, 2 * self.ref_h.max())
-            for c, idx in zip(centres, near):
-                idx = np.asarray(idx, dtype=np.int64)
-                sel = idx[np.linalg.norm(self.ref_x[idx] - c, axis=1) < 2 * self.ref_h[idx]]
-                self.ref_h[sel] = np.maximum(self.ref_h[sel] / 2, self.config.h_min * self.h0)
+        self._scale_size_near(centres, 0.5, floor=self.config.h_min * self.h0)
         self.config = replace(self.config, iterations=iterations)
         return self.run()
+
+    def coarsen_near(self, centres: np.ndarray, iterations: int = 4) -> RemeshResult:
+        """Doubles the size field within 2 h of the given points, beyond h_max, and continues
+        remeshing: vertices there are collapsed, so a feature finer than the mesh (a narrow gap
+        or wedge that forces flat tetrahedra) is simplified away. The guards still hold, the
+        grain geometry changes locally by a fraction of h (author's proposal, 29.10.2026)."""
+        self._scale_size_near(centres, 2.0)
+        self.config = replace(self.config, iterations=iterations)
+        return self.run()
+
+    def _scale_size_near(self, centres, factor, floor=0.0):
+        if not len(centres):
+            return
+        near = self.ref_vertex_tree.query_ball_point(centres, 2 * self.ref_h.max())
+        for c, idx in zip(centres, near):
+            idx = np.asarray(idx, dtype=np.int64)
+            sel = idx[np.linalg.norm(self.ref_x[idx] - c, axis=1) < 2 * self.ref_h[idx]]
+            self.ref_h[sel] = np.maximum(self.ref_h[sel] * factor, floor)
 
     _STATE = ('x', 's', 'curve_start', 'tris', 'patch', 'tnorm', 'kind', 'entity', 'lock', 'shift', 'cls', 'anchor', 'cedge', 'ccurve')
 

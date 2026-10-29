@@ -4,14 +4,19 @@
     -> adaptive remeshing of the grain boundaries (M4a) -> gmsh tetrahedra (M4)
 
 Feedback: tetrahedra with a smallest dihedral angle below `min_dihedral` are almost always forced
-by the surface (a grain locally thinner than its boundary triangles, or a slightly concave edge
-bridged by one flat element; process notes 7.12). The size field of the remeshing is halved around
-them (down to h_min), the surface is remeshed further and the volume meshed again, up to
-`feedback_rounds` times. What remains is reported.
+by the surface (a grain locally thinner than its boundary triangles, a narrow wedge at a line, or
+a slightly concave edge bridged by one flat element; process notes 7.12). Around them the surface
+is remeshed further and the volume meshed again, one step of `feedback` per round: 'coarsen'
+doubles the size field there so vertices are collapsed and the fine feature is simplified away
+(author's proposal), 'refine' halves it down to h_min. What remains is reported.
+
+Resolution: where h_max (a quarter of the grain diameter) is not above h_min for most grains, the
+voxels are too coarse for the grain size; the mesh is made anyway and a warning is given.
 """
 import time
 from dataclasses import dataclass, field
-from typing import Optional, Sequence
+import logging
+from typing import Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -32,8 +37,12 @@ class MeshConfig:
     tetmesh: TetMeshConfig = field(default_factory=TetMeshConfig)
     min_dihedral: float = 5.0
     """Acceptance of the author: smallest dihedral angle of every tetrahedron, degrees."""
-    feedback_rounds: int = 3
+    feedback: Tuple[str, ...] = ('coarsen', 'coarsen', 'coarsen')
+    """One step per feedback round: 'coarsen' or 'refine' around the poor tetrahedra. The round
+    with the fewest poor tetrahedra is returned."""
     feedback_iterations: int = 4
+    coarse_warning: float = 0.5
+    """Warn when more than this share of the grains has d / 4 <= h_min (voxels too coarse)."""
 
 
 @dataclass
@@ -60,6 +69,18 @@ def mesh_rve(labels: np.ndarray, spacing: Sequence[float], periodic: Sequence[bo
     seconds['cleanup'] = time.perf_counter() - t
     stats['cleanup'] = {'changed_voxels': cleanup.changed_voxels, 'critical_after': cleanup.critical_after}
 
+    stats['warnings'] = []
+    if config.remeshing is not None:
+        counts = np.bincount(cleaned.ravel())[1:]
+        d = (6 * counts[counts > 0] * np.prod(spacing) / np.pi) ** (1 / 3)
+        coarse = float(np.mean(config.remeshing.h_max_fraction * d <= config.remeshing.h_min * min(spacing)))
+        stats['coarse_grain_share'] = coarse
+        if coarse > config.coarse_warning:
+            msg = (f'{coarse:.0%} of the grains are smaller than 4 voxels across; the resolution is too coarse '
+                   f'for the grain size and the adaptive surface cannot be coarser than the voxels there')
+            stats['warnings'].append(msg)
+            logging.getLogger(__name__).warning(msg)
+
     t = time.perf_counter()
     staircase = build_model(build_topology(cleaned, spacing, periodic))
     seconds['model'] = time.perf_counter() - t
@@ -80,7 +101,8 @@ def mesh_rve(labels: np.ndarray, spacing: Sequence[float], periodic: Sequence[bo
 
     stats['feedback'] = []
     seconds['tetmesh'] = 0.0
-    for round_ in range(config.feedback_rounds + 1):
+    best = None
+    for round_ in range(len(config.feedback) + 1):
         t = time.perf_counter()
         tets = tet_mesh(surface, points, spacing, config.tetmesh)
         seconds['tetmesh'] += time.perf_counter() - t
@@ -88,13 +110,20 @@ def mesh_rve(labels: np.ndarray, spacing: Sequence[float], periodic: Sequence[bo
         bad = np.flatnonzero(dihedral < config.min_dihedral)
         stats['feedback'].append({'triangles': int(len(surface.oriented)), 'elements': int(len(dihedral)),
                                   'below_min_dihedral': int(len(bad)), 'min_dihedral': float(dihedral.min())})
-        if not len(bad) or remesher is None or round_ == config.feedback_rounds:
+        # keep the best round: fewest poor tetrahedra, then the largest smallest angle
+        score = (len(bad), -float(dihedral.min()))
+        if best is None or score < best[0]:
+            best = (score, round_, surface, points, tets)
+        if not len(bad) or remesher is None or round_ == len(config.feedback):
             break
         t = time.perf_counter()
         centres = tets.mesh.points[tets.mesh.corners[bad]].mean(axis=1)
-        remeshed = remesher.refine_near(centres, config.feedback_iterations)
+        step = remesher.coarsen_near if config.feedback[round_] == 'coarsen' else remesher.refine_near
+        stats['feedback'][-1]['next'] = config.feedback[round_]
+        remeshed = step(centres, config.feedback_iterations)
         seconds['remeshing'] += time.perf_counter() - t
         surface, points = remeshed.model, remeshed.points
+    _, stats['feedback_best_round'], surface, points, tets = best
     if remesher is not None:
         stats['remeshing'] = remesher.stats
     return MeshResult(labels=cleaned, staircase=staircase, smoothed=smoothed, surface=surface, points=points,

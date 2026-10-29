@@ -104,6 +104,28 @@ def test_refine_near_makes_the_surface_finer_there():
     assert all(v == 0 for v in check(model, fine, (1, 1, 1))['errors'].values())
 
 
+def test_coarsen_near_makes_the_surface_coarser_there():
+    labels = np.ones((16, 16, 16), dtype=np.int32)
+    labels[8:] = 2
+    labels[3:6, 3:6, 3:6] = 3
+    labels, _ = ManifoldCleaner((False,) * 3).run(labels)
+    model = build_model(build_topology(labels, (1, 1, 1), (False,) * 3))
+    smoothed = smooth(model, (1, 1, 1))
+    remesher = Remesher(model, smoothed.points, labels, (1, 1, 1), smoothed.grain_volume_target)
+    centre = np.array([[8.0, 8.0, 8.0]])
+
+    def edge_near(result):
+        x, tris = result.points, result.model.oriented
+        near = np.linalg.norm(x[tris].mean(axis=1) - centre, axis=1) < 3.0
+        t = x[tris[near]]
+        return np.linalg.norm(t - t[:, [1, 2, 0]], axis=2).mean()
+
+    before = edge_near(remesher.run())
+    coarse = remesher.coarsen_near(centre)
+    assert edge_near(coarse) > 1.2 * before
+    assert all(v == 0 for v in check(model, coarse, (1, 1, 1))['errors'].values())
+
+
 def test_shared_vertex_crossings_are_found():
     # two triangles sharing vertex 0; the second one passes through the first
     pts = np.array([[0, 0, 0], [2, 0, 0], [0, 2, 0], [0.5, 0.5, -1], [0.5, 0.5, 1]], dtype=float)
@@ -139,5 +161,7 @@ def test_generated_rve_pipeline(generated):
     # acceptance: p1 of the smallest dihedral angle >= 15 degrees; the minimum >= 5 degrees except
     # for counted exceptions
     assert rep['dihedral_min_deg']['p1'] >= 15.0
-    assert result.stats['feedback'][-1]['below_min_dihedral'] <= 2
-    assert result.stats['feedback'][-1]['triangles'] < len(result.staircase.oriented)
+    best = result.stats['feedback'][result.stats['feedback_best_round']]
+    assert best['below_min_dihedral'] <= 2
+    assert best['below_min_dihedral'] == min(f['below_min_dihedral'] for f in result.stats['feedback'])
+    assert best['triangles'] < len(result.staircase.oriented)

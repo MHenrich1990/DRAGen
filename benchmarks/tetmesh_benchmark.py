@@ -48,7 +48,7 @@ def run(tag: str, config: MeshConfig) -> dict:
     out = {'tag': tag, 'code': code_state(), 'shape': list(labels.shape),
            'config': {'tetmesh': vars(config.tetmesh),
                       'remeshing': vars(config.remeshing) if config.remeshing else None,
-                      'min_dihedral': config.min_dihedral, 'feedback_rounds': config.feedback_rounds},
+                      'min_dihedral': config.min_dihedral, 'feedback': list(config.feedback)},
            'spacing': list(spacing), 'periodic': list(periodic), 'n_grains': int(labels.max())}
     t = time.perf_counter()
     result = mesh_rve(labels, spacing, periodic, config)
@@ -56,6 +56,9 @@ def run(tag: str, config: MeshConfig) -> dict:
     out['seconds'].update({f'tetmesh_{k}': v for k, v in result.tets.stats.pop('seconds').items()})
     out['tetmesh'] = result.tets.stats
     out['feedback'] = result.stats['feedback']
+    out['warnings'] = result.stats['warnings']
+    out['feedback_best_round'] = result.stats['feedback_best_round']
+    out['coarse_grain_share'] = result.stats.get('coarse_grain_share')
     out['staircase_triangles'] = int(len(result.staircase.oriented))
     if config.remeshing is not None:
         rem = result.stats['remeshing']
@@ -104,9 +107,9 @@ def main():
         q = result['quality']
         fb = result['feedback']
         row = {'tag': tag, 'voxels': int(np.prod(result['shape'])), 'grains': result['n_grains'],
-               'staircase_triangles': result['staircase_triangles'], 'triangles': fb[-1]['triangles'],
-               'feedback_rounds': len(fb) - 1, 'below_5deg_first': fb[0]['below_min_dihedral'],
-               'below_5deg': fb[-1]['below_min_dihedral'],
+               'staircase_triangles': result['staircase_triangles'], 'triangles': fb[result['feedback_best_round']]['triangles'],
+               'feedback_rounds': len(fb) - 1, 'feedback_best_round': result.get('feedback_best_round'), 'below_5deg_first': fb[0]['below_min_dihedral'],
+               'below_5deg': fb[result['feedback_best_round']]['below_min_dihedral'],
                'volume_vs_surface_max_abs': q['volume_vs_surface']['max_abs'],
                'bodies': result['tetmesh']['bodies'], 'cavities': result['tetmesh']['cavities'],
                'elements': q['n_elements'], 'nodes': q['n_points'], 'elements_per_voxel': q['elements_per_voxel'],

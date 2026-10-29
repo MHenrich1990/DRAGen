@@ -134,6 +134,18 @@ def test_shared_vertex_crossings_are_found():
     assert len(self_intersection_pairs(pts, tris, shared_vertex=True)) == 1
 
 
+def test_vertex_touching_a_foreign_triangle_is_found():
+    # vertex 5 of the second triangle lies on the edge (1, 2) of the first one, outside its plane
+    # the second triangle rises away: no crossing, but a T-junction gmsh HXT rejects
+    pts = np.array([[0, 0, 0], [2, 0, 0], [0, 2, 0], [1, 1, 1], [2, 2, 1], [1, 1, 0]], dtype=float)
+    tris = np.array([[0, 1, 2], [3, 4, 5]])
+    assert len(self_intersection_pairs(pts, tris, shared_vertex=True)) == 0
+    assert len(self_intersection_pairs(pts, tris, shared_vertex=True, touching=True)) == 1
+    # a corner shared by both triangles does not count
+    tris = np.array([[0, 1, 2], [3, 4, 0]])
+    assert len(self_intersection_pairs(pts, tris, shared_vertex=True, touching=True)) == 0
+
+
 @pytest.fixture(scope='module')
 def generated():
     import legacy_baseline

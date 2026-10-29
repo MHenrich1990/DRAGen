@@ -240,11 +240,13 @@ def self_intersections(points: np.ndarray, triangles: np.ndarray, tol: float = 1
 
 
 def self_intersection_pairs(points: np.ndarray, triangles: np.ndarray, candidates: np.ndarray = None,
-                            tol: float = 1e-9, shared_vertex: bool = False) -> np.ndarray:
+                            tol: float = 1e-9, shared_vertex: bool = False, touching: bool = False) -> np.ndarray:
     """The crossing pairs (k, 2) of `self_intersections`; with `candidates` (triangle indices)
     only pairs that involve at least one candidate are tested. With shared_vertex, pairs that share
     one vertex are tested as well (only pairs sharing an edge are skipped); a hit at the shared
-    vertex itself does not count."""
+    vertex itself does not count. With touching, a corner of one triangle that lies on the other
+    one (inside or on its boundary) but is none of its corners counts as well: a T-junction, which
+    a volume mesher rejects (gmsh HXT: "a vertex and a facet intersect")."""
     p = points[triangles]
     lo, hi = p.min(axis=1), p.max(axis=1)
     pairs = _box_pairs(lo, hi, candidates)
@@ -282,11 +284,17 @@ def self_intersection_pairs(points: np.ndarray, triangles: np.ndarray, candidate
         apart = np.all((d > eps) | shared, axis=1) | np.all((d < -eps) | shared, axis=1)
         i, j, eq = i[~apart], j[~apart], eq[~apart]
     hit = np.zeros(len(i), dtype=bool)
-    for a, b in ((i, j), (j, i)):
+    for swap, (a, b) in enumerate(((i, j), (j, i))):
         # corners of a close to the plane of b: only those segments can lie in it
         rel = p[a] - p[b, :1]
         d = np.abs(np.einsum('ikj,ij->ik', rel, normal[b]))
         near = d <= 1e-9 * (normal_len[b] * np.maximum(np.abs(rel).max(axis=(1, 2)), 1e-300))[:, None]
+        if touching:
+            own = eq.any(axis=1) if swap else eq.any(axis=2)          # corner of a is one of b's
+            rows = np.flatnonzero((near & ~own).any(axis=1))
+            if len(rows):
+                ra, rb = a[rows], b[rows]
+                hit[rows] |= _corners_on_triangle(p[ra], p[rb], normal[rb], (near & ~own)[rows], tol)
         tb = (p[b, 0], e1[b], e2[b], e1_len[b], e2_len[b])
         for k in range(3):
             hit |= _segment_hits_triangle(p[a, k], p[a, (k + 1) % 3], None, tol, tb)
@@ -389,6 +397,29 @@ def _box_pairs(lo: np.ndarray, hi: np.ndarray, candidates=None) -> np.ndarray:
         overlap &= (lod[i] <= hid[j]) & (lod[j] <= hid[i])
     i, j = i[overlap], j[overlap]
     return np.column_stack([np.minimum(i, j), np.maximum(i, j)])
+
+
+def _corners_on_triangle(pa, pb, n, sel, tol):
+    """Whether a selected corner of triangle a (pa, (m, 3, 3)), lying in the plane of triangle b
+    (pb, normal n), lies inside b or on its boundary, in the projection that drops the dominant
+    normal component."""
+    drop = np.argmax(np.abs(n), axis=1)
+    keep = np.array([[1, 2], [0, 2], [0, 1]])[drop][:, None, :]
+    qa = np.take_along_axis(pa, keep, axis=2)
+    qt = np.take_along_axis(pb, keep, axis=2)
+    t = [qt[:, m] for m in range(3)]
+
+    def orient(p, q, r):
+        return (q[:, 0] - p[:, 0]) * (r[:, 1] - p[:, 1]) - (q[:, 1] - p[:, 1]) * (r[:, 0] - p[:, 0])
+
+    sign = np.sign(orient(t[0], t[1], t[2]))
+    size = np.maximum(np.maximum(np.abs(qa).max(axis=(1, 2)), np.abs(qt).max(axis=(1, 2))), 1e-300)
+    e = tol * size ** 2
+    out = np.zeros(len(pa), dtype=bool)
+    for k in range(3):
+        o = np.stack([orient(t[m], t[(m + 1) % 3], qa[:, k]) for m in range(3)], axis=1) * sign[:, None]
+        out |= sel[:, k] & (sign != 0) & np.all(o >= -e[:, None], axis=1)
+    return out
 
 
 def _coplanar_edges_hit_triangle(pa, pb, n, nn, flat, tol):

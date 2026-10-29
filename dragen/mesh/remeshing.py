@@ -348,7 +348,7 @@ class Remesher:
             moved &= ~back
             candidates = np.flatnonzero(back[self.tris].any(axis=1))
             # the reverted triangles and everything they may now cross
-        self.stats['unresolved_crossings'] = int(len(self_intersection_pairs(self.x, self.tris, shared_vertex=True)))
+        self.stats['unresolved_crossings'] = int(len(self_intersection_pairs(self.x, self.tris, shared_vertex=True, touching=True)))
 
     def refine_near(self, centres: np.ndarray, iterations: int = 4) -> RemeshResult:
         """Halves the size field (down to h_min) within 2 h of the given points, e.g. the centres
@@ -418,7 +418,7 @@ class Remesher:
         """Vertices of triangles that cross another one, among pairs involving the candidates."""
         out = np.zeros(len(x), dtype=bool)
         if len(candidates):
-            pairs = self_intersection_pairs(x, self.tris, candidates=candidates, shared_vertex=True)
+            pairs = self_intersection_pairs(x, self.tris, candidates=candidates, shared_vertex=True, touching=True)
             out[self.tris[pairs.ravel()].ravel()] = True
         return out
 
@@ -664,6 +664,12 @@ class Remesher:
         first = np.concatenate([[True], e[order[1:]] != e[order[:-1]]])
         pick = order[first]
         a, b, e = a[pick], b[pick], e[pick]
+        if self._only is not None:
+            # a repeated batch: only the collapses accepted in the previous try are evaluated
+            pick = np.flatnonzero(np.isin(self._group_key(a, b), self._only))
+            a, b, e = a[pick], b[pick], e[pick]
+            if not len(a):
+                return 0
 
         # link condition: common neighbours of a and b = opposite vertices of the edge's triangles
         adj = self._adjacency(edges, len(x))
@@ -783,6 +789,12 @@ class Remesher:
         b = tri1[np.arange(len(inner)), (l1 + 1) % 3]
         c = tri1[np.arange(len(inner)), (l1 + 2) % 3]
         d = tri2[np.arange(len(inner)), (he_local[h2] + 2) % 3]
+        if self._only is not None:
+            # a repeated batch: only the flips accepted in the previous try are evaluated
+            sel = np.isin(self._group_key(a, b), self._only)
+            inner, t1, t2, tri1, tri2, a, b, c, d = (v[sel] for v in (inner, t1, t2, tri1, tri2, a, b, c, d))
+            if not len(inner):
+                return 0
         x = self.x
         old = np.stack([x[tri1], x[tri2]], axis=1)                 # (k, 2, 3, 3)
         new1, new2 = np.column_stack([a, d, c]), np.column_stack([d, b, c])
@@ -1153,7 +1165,7 @@ def check(original: SurfaceModel, result: RemeshResult, spacing) -> dict:
         'errors': {
             'patch_euler_changed': int(np.count_nonzero(chi_old != chi_new)),
             'lost_patches': int(np.count_nonzero(np.bincount(topo.patch, minlength=len(model.surfaces)) == 0)),
-            'self_intersections': int(len(self_intersection_pairs(x, tris, shared_vertex=True))),
+            'self_intersections': int(len(self_intersection_pairs(x, tris, shared_vertex=True, touching=True))),
             'anchors_moved': int(anchors_moved > 0),
             'periodic_unmatched_nodes': int(sum(v['unmatched_nodes'] for v in per.values())),
             'periodic_unmatched_facets': int(sum(v['unmatched_facets'] for v in per.values())),

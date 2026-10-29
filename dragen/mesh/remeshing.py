@@ -90,6 +90,7 @@ class Remesher:
         self.config = config
         self.spacing = np.asarray(spacing, dtype=float)
         self.h0 = float(self.spacing.min())
+        self.box = np.array(model.topology.shape) * self.spacing
         self.target = target_volume
         self.rng = np.random.default_rng(config.seed)
         topo = model.topology
@@ -822,12 +823,15 @@ class Remesher:
         self.x, self.s = new, s_new
 
     def _guard_move(self, x, new):
-        """Puts back the vertices of triangles that fold and of wedges that close."""
+        """Puts back the vertices of triangles that fold, of wedges that close and vertices that
+        would leave the box or touch a box face plane they are not locked to."""
         before = self._wedge_vertices(x, self.tris)
+        outside = lambda y: np.any(~self.lock & ((y <= 0) | (y >= self.box)), axis=1)
         for _ in range(8):
             back = np.zeros(len(x), dtype=bool)
             back[self.tris[self._folded(x, new)].ravel()] = True
             back |= self._wedge_vertices(new, self.tris) & ~before
+            back |= outside(new) & ~outside(x)
             back &= np.any(new != x, axis=1)
             if not back.any():
                 break
@@ -1103,6 +1107,7 @@ def check(original: SurfaceModel, result: RemeshResult, spacing) -> dict:
             'periodic_unmatched_facets': int(sum(v['unmatched_facets'] for v in per.values())),
             'misoriented_edges': int(_misoriented(tris, topo.patch)),
             'edges_in_box_plane': int(_edges_in_box_plane(model, x)),
+            'vertices_outside_box': int(np.count_nonzero(np.any(~model.box_lock & ((x <= 0) | (x >= box)), axis=1))),
         },
     }
 
@@ -1114,27 +1119,33 @@ def _independent_set(ok, prio, cand_of, res_of, n_res, rounds=16):
     round a candidate wins if it has the highest priority on all its resources among the candidates
     still available; the resources of the winners are then blocked.
 
-    cand_of, res_of: one row per (candidate, resource) pair. Priorities of different candidates
-    must differ."""
+    cand_of, res_of: one row per (candidate, resource) pair."""
     selected = np.zeros(len(ok), dtype=bool)
     if not len(cand_of):
         return selected
     # rows sorted by resource, then priority: the last available row of a resource holds its best
     order = np.lexsort((prio[cand_of], res_of))
+    order = order[ok[cand_of[order]]]
     cand_s, res_s = cand_of[order], res_of[order]
     blocked = np.zeros(n_res, dtype=bool)
+    alive = np.ones(len(ok), dtype=bool)
+    best = np.zeros(n_res, dtype=np.int64)
     for _ in range(rounds):
-        avail = ok & ~selected
-        avail &= ~(np.bincount(cand_s, weights=blocked[res_s], minlength=len(ok)) > 0)
-        rows = np.flatnonzero(avail[cand_s])
-        if not len(rows):
+        # drop the rows of candidates that are selected or touch a blocked resource
+        dead = np.zeros(len(ok), dtype=bool)
+        dead[cand_s[blocked[res_s]]] = True
+        alive &= ~dead & ~selected
+        keep = alive[cand_s]
+        cand_s, res_s = cand_s[keep], res_s[keep]
+        if not len(cand_s):
             break
-        r = res_s[rows]
-        last = rows[np.concatenate([r[1:] != r[:-1], [True]])]
-        best = np.zeros(n_res, dtype=np.int64)
+        last = np.concatenate([res_s[1:] != res_s[:-1], [True]])
         best[res_s[last]] = prio[cand_s[last]]
-        lose = np.bincount(cand_s[rows], weights=best[res_s[rows]] != prio[cand_s[rows]], minlength=len(ok)) > 0
-        win = avail & ~lose
+        lose = np.zeros(len(ok), dtype=bool)
+        lose[cand_s[best[res_s] != prio[cand_s]]] = True
+        present = np.zeros(len(ok), dtype=bool)
+        present[cand_s] = True
+        win = present & ~lose
         if not win.any():
             break
         selected |= win

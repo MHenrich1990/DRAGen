@@ -87,7 +87,16 @@ def main():
                               for p in glob.glob(os.path.join(SOURCE_DIR, '*', 'labels.npz')))
     rows = []
     for tag in tags:
-        result = run(tag, config)
+        try:
+            result = run(tag, config)
+        except Exception as err:                       # keep going, record the failure
+            out_dir = os.path.join(RESULT_DIR, args.variant, tag)
+            os.makedirs(out_dir, exist_ok=True)
+            with open(os.path.join(out_dir, 'result.json'), 'w') as f:
+                json.dump({'tag': tag, 'code': code_state(), 'error': repr(err)}, f, indent=2)
+            rows.append({'tag': tag, 'error': repr(err)})
+            print(json.dumps(rows[-1]), flush=True)
+            continue
         out_dir = os.path.join(RESULT_DIR, args.variant, tag)
         os.makedirs(out_dir, exist_ok=True)
         with open(os.path.join(out_dir, 'result.json'), 'w') as f:
@@ -117,7 +126,7 @@ def main():
                'longest_edge_max': q['longest_edge_voxels']['max']}
         row.update({f's_{k}': round(v, 2) for k, v in result['seconds'].items()})
         rows.append(row)
-        print(json.dumps(row))
+        print(json.dumps(row), flush=True)
     import pandas as pd
     path = os.path.join(RESULT_DIR, args.variant, 'summary.csv')
     df = pd.DataFrame(rows)

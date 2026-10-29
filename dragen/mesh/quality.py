@@ -268,9 +268,16 @@ def self_intersection_pairs(points: np.ndarray, triangles: np.ndarray, candidate
         i, j = i[~apart], j[~apart]
     hit = np.zeros(len(i), dtype=bool)
     for a, b in ((i, j), (j, i)):
+        # corners of a close to the plane of b: only those segments can lie in it
+        n = np.cross(p[b, 1] - p[b, 0], p[b, 2] - p[b, 0])
+        rel = p[a] - p[b, :1]
+        d = np.abs(np.einsum('ikj,ij->ik', rel, n))
+        near = d <= 1e-9 * (np.linalg.norm(n, axis=1) * np.maximum(np.abs(rel).max(axis=(1, 2)), 1e-300))[:, None]
         for k in range(3):
             hit |= _segment_hits_triangle(p[a, k], p[a, (k + 1) % 3], p[b], tol)
-            hit |= _coplanar_segment_hits_triangle(p[a, k], p[a, (k + 1) % 3], p[b], tol)
+            flat = np.flatnonzero(near[:, k] & near[:, (k + 1) % 3])
+            if len(flat):
+                hit[flat] |= _coplanar_segment_hits_triangle(p[a[flat], k], p[a[flat], (k + 1) % 3], p[b[flat]], tol)
     return np.column_stack([i[hit], j[hit]])
 
 

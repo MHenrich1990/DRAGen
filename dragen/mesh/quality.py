@@ -251,34 +251,53 @@ def self_intersection_pairs(points: np.ndarray, triangles: np.ndarray, candidate
     if len(pairs) == 0:
         return np.zeros((0, 2), dtype=np.int64)
     i, j = pairs[:, 0], pairs[:, 1]
-    common = (triangles[i][:, :, None] == triangles[j][:, None, :]).any(axis=2).sum(axis=1)
-    skip = common >= (2 if shared_vertex else 1)
-    i, j = i[~skip], j[~skip]
+    # eq[k, u, v]: corner u of triangle i equals corner v of triangle j
+    eq = triangles[i][:, :, None] == triangles[j][:, None, :]
+    common = eq.any(axis=2).sum(axis=1)
+    keep = common < (2 if shared_vertex else 1)
+    i, j, eq = i[keep], j[keep], eq[keep]
+    # per triangle in a pair: edge vectors, normal and their lengths (gathered per pair below)
+    used = np.zeros(len(triangles), dtype=bool)
+    used[i] = True
+    used[j] = True
+    used = np.flatnonzero(used)
+    slot = np.zeros(len(triangles), dtype=np.int64)
+    slot[used] = np.arange(len(used))
+    pu = p[used]
+    p0 = pu[:, 0]
+    e1, e2 = pu[:, 1] - p0, pu[:, 2] - p0
+    normal = np.cross(e1, e2)
+    normal_len = np.linalg.norm(normal, axis=1)
+    e1_len, e2_len = np.linalg.norm(e1, axis=1), np.linalg.norm(e2, axis=1)
+    p, i, j = pu, slot[i], slot[j]
     # separating planes: if all corners of one triangle lie clearly on one side of the other's
     # plane, the two cannot cross (corners close to the plane keep the pair); a shared corner is
     # left out, since touching there does not count
     for swap in (False, True):
         a, b = (j, i) if swap else (i, j)
-        n = np.cross(p[a, 1] - p[a, 0], p[a, 2] - p[a, 0])
         rel = p[b] - p[a, :1]
-        d = np.einsum('ikj,ij->ik', rel, n)
-        eps = (tol * np.linalg.norm(n, axis=1) * np.abs(rel).max(axis=(1, 2)))[:, None]
-        shared = (triangles[b][:, :, None] == triangles[a][:, None, :]).any(axis=2)
+        d = np.einsum('ikj,ij->ik', rel, normal[a])
+        eps = (tol * normal_len[a] * np.abs(rel).max(axis=(1, 2)))[:, None]
+        shared = eq.any(axis=2) if swap else eq.any(axis=1)      # per corner of b
         apart = np.all((d > eps) | shared, axis=1) | np.all((d < -eps) | shared, axis=1)
-        i, j = i[~apart], j[~apart]
+        i, j, eq = i[~apart], j[~apart], eq[~apart]
     hit = np.zeros(len(i), dtype=bool)
     for a, b in ((i, j), (j, i)):
         # corners of a close to the plane of b: only those segments can lie in it
-        n = np.cross(p[b, 1] - p[b, 0], p[b, 2] - p[b, 0])
         rel = p[a] - p[b, :1]
-        d = np.abs(np.einsum('ikj,ij->ik', rel, n))
-        near = d <= 1e-9 * (np.linalg.norm(n, axis=1) * np.maximum(np.abs(rel).max(axis=(1, 2)), 1e-300))[:, None]
+        d = np.abs(np.einsum('ikj,ij->ik', rel, normal[b]))
+        near = d <= 1e-9 * (normal_len[b] * np.maximum(np.abs(rel).max(axis=(1, 2)), 1e-300))[:, None]
+        tb = (p[b, 0], e1[b], e2[b], e1_len[b], e2_len[b])
         for k in range(3):
-            hit |= _segment_hits_triangle(p[a, k], p[a, (k + 1) % 3], p[b], tol)
-            flat = np.flatnonzero(near[:, k] & near[:, (k + 1) % 3])
-            if len(flat):
-                hit[flat] |= _coplanar_segment_hits_triangle(p[a[flat], k], p[a[flat], (k + 1) % 3], p[b[flat]], tol)
-    return np.column_stack([i[hit], j[hit]])
+            hit |= _segment_hits_triangle(p[a, k], p[a, (k + 1) % 3], None, tol, tb)
+        flat = near & near[:, [1, 2, 0]]                        # edge k: corners k and k + 1
+        rows = np.flatnonzero(flat.any(axis=1))
+        if len(rows):
+            ra, rb = a[rows], b[rows]
+            hit[rows] |= _coplanar_edges_hit_triangle(p[ra], p[rb], normal[rb], normal_len[rb], flat[rows], tol)
+    i, j = used[i[hit]], used[j[hit]]
+    order = np.lexsort((j, i))
+    return np.column_stack([i[order], j[order]])
 
 
 def _box_pairs(lo: np.ndarray, hi: np.ndarray, candidates=None) -> np.ndarray:
@@ -295,100 +314,142 @@ def _box_pairs(lo: np.ndarray, hi: np.ndarray, candidates=None) -> np.ndarray:
     b = np.floor((hi - origin) / cell).astype(np.int64)
     dims = b.max(axis=0) + 1
     span = b - a
-    rows, keys = [], []
-    for dx in range(int(span[:, 0].max()) + 1):
-        for dy in range(int(span[:, 1].max()) + 1):
-            for dz in range(int(span[:, 2].max()) + 1):
-                idx = np.flatnonzero((span[:, 0] >= dx) & (span[:, 1] >= dy) & (span[:, 2] >= dz))
-                c = a[idx] + np.array([dx, dy, dz])
-                rows.append(idx)
-                keys.append(c[:, 0] + dims[0] * (c[:, 1] + dims[1] * c[:, 2]))
-    rows, keys = np.concatenate(rows), np.concatenate(keys)
+
+    def cells(sel):
+        """(box, cell key) for every cell touched by the selected boxes."""
+        ext = span[sel] + 1
+        count = ext.prod(axis=1)
+        rows = np.repeat(sel, count)
+        k = np.arange(len(rows)) - np.repeat(np.cumsum(count) - count, count)
+        ey, ez = np.repeat(ext[:, 1], count), np.repeat(ext[:, 2], count)
+        c = a[rows] + np.column_stack([k // (ey * ez), (k // ez) % ey, k % ez])
+        return rows, c[:, 0] + dims[0] * (c[:, 1] + dims[1] * c[:, 2])
+
+    flag = None
     if candidates is not None:
-        # only the cells that hold a candidate matter
         flag = np.zeros(n, dtype=bool)
         flag[np.asarray(candidates, dtype=np.int64)] = True
-        keep = np.isin(keys, np.unique(keys[flag[rows]]))
+        if not flag.any():
+            return np.zeros((0, 2), dtype=np.int64)
+    if flag is not None and int(np.prod(dims)) <= 50_000_000:
+        # only the cells that hold a candidate matter, marked on a dense grid (no sorting); a box
+        # can reach a marked cell only if its lowest cell lies at most its span below one, so the
+        # marks are first spread downwards by the largest span to preselect the boxes
+        mark = np.zeros(tuple(dims[::-1]), dtype=bool)
+        mark.ravel()[cells(np.flatnonzero(flag))[1]] = True
+        reach = mark.copy()
+        for axis, s in zip((2, 1, 0), span.max(axis=0)):
+            r = reach.copy()
+            for shift in range(1, int(s) + 1):
+                sl = [slice(None)] * 3
+                sl[axis] = slice(0, -shift)
+                src = [slice(None)] * 3
+                src[axis] = slice(shift, None)
+                r[tuple(sl)] |= reach[tuple(src)]
+            reach = r
+        a_key = a[:, 0] + dims[0] * (a[:, 1] + dims[1] * a[:, 2])
+        rows, keys = cells(np.flatnonzero(reach.ravel()[a_key]))
+        keep = mark.ravel()[keys]
         rows, keys = rows[keep], keys[keep]
-    order = np.argsort(keys, kind='stable')
-    rows, keys = rows[order], keys[order]
+    else:
+        rows, keys = cells(np.arange(n))
+        if flag is not None:
+            keep = np.isin(keys, np.unique(keys[flag[rows]]))
+            rows, keys = rows[keep], keys[keep]
+    # within each cell the entries that are no candidates come first; a candidate entry is paired
+    # with those and with all entries after it, so every pair in a cell is formed once
+    cand = np.ones(len(rows), dtype=bool) if flag is None else flag[rows]
+    order = np.argsort(keys * 2 + cand)
+    rows, keys, cand = rows[order], keys[order], cand[order]
     starts = np.flatnonzero(np.concatenate([[True], keys[1:] != keys[:-1]]))
     counts = np.diff(np.concatenate([starts, [len(keys)]]))
-    start_of = np.repeat(starts, counts)
-    count_of = np.repeat(counts, counts)
-    # every entry is paired with every entry of its cell (or, with candidates, only candidate
-    # entries are expanded)
-    src = np.arange(len(rows))
-    if candidates is not None:
-        flag = np.zeros(n, dtype=bool)
-        flag[np.asarray(candidates, dtype=np.int64)] = True
-        src = src[flag[rows]]
-    total = count_of[src]
+    others = np.add.reduceat(~cand, starts) if len(starts) else np.zeros(0, dtype=np.int64)
+    src = np.flatnonzero(cand)
+    cell_of = np.repeat(np.arange(len(starts)), counts)[src]
+    n_before = others[cell_of]
+    n_after = starts[cell_of] + counts[cell_of] - 1 - src
+    total = n_before + n_after
     first = np.repeat(src, total)
     offset = np.arange(int(total.sum())) - np.repeat(np.cumsum(total) - total, total)
-    second = start_of[first] + offset
+    before = np.repeat(n_before, total)
+    second = np.where(offset < before, np.repeat(starts[cell_of], total) + offset,
+                      first + 1 + offset - before)
     i, j = rows[first], rows[second]
-    keep = i != j
-    i, j = np.minimum(i[keep], j[keep]), np.maximum(i[keep], j[keep])
-    if not len(i):
-        return np.zeros((0, 2), dtype=np.int64)
-    pairs = unique_pairs(i, j)
-    i, j = pairs[:, 0], pairs[:, 1]
-    overlap = np.all((lo[i] <= hi[j]) & (lo[j] <= hi[i]), axis=1)
-    return pairs[overlap]
+    # each pair is kept once: in its first common cell (the larger of the two lowest cells, which
+    # both boxes touch if they overlap)
+    keep = np.ones(len(i), dtype=bool)
+    key = keys[first]
+    for d, k in enumerate((key % dims[0], (key // dims[0]) % dims[1], key // (dims[0] * dims[1]))):
+        ad = a[:, d]
+        keep &= np.maximum(ad[i], ad[j]) == k
+    i, j = i[keep], j[keep]
+    overlap = np.ones(len(i), dtype=bool)
+    for d in range(3):
+        lod, hid = lo[:, d], hi[:, d]
+        overlap &= (lod[i] <= hid[j]) & (lod[j] <= hid[i])
+    i, j = i[overlap], j[overlap]
+    return np.column_stack([np.minimum(i, j), np.maximum(i, j)])
 
 
-def _coplanar_segment_hits_triangle(s0, s1, tri, tol):
-    """A segment lying in the plane of a triangle that crosses one of its edges or ends strictly
-    inside it (the 3D test above cannot see this: the segment is parallel to the plane). Touching
-    at vertices or along edges does not count."""
-    n = np.cross(tri[:, 1] - tri[:, 0], tri[:, 2] - tri[:, 0])
-    nn = np.linalg.norm(n, axis=1)
-    scale = np.maximum(np.abs(s0 - tri[:, 0]).max(axis=1), np.abs(s1 - tri[:, 0]).max(axis=1))
-    eps = 1e-9 * nn * np.maximum(scale, 1e-300)
-    flat = (np.abs(np.einsum('ij,ij->i', s0 - tri[:, 0], n)) <= eps)         & (np.abs(np.einsum('ij,ij->i', s1 - tri[:, 0], n)) <= eps) & (nn > 0)
-    out = np.zeros(len(s0), dtype=bool)
-    idx = np.flatnonzero(flat)
-    if not len(idx):
-        return out
+def _coplanar_edges_hit_triangle(pa, pb, n, nn, flat, tol):
+    """Whether an edge of triangle a (corners pa, (m, 3, 3)) lying in the plane of triangle b
+    (corners pb, normal n, |n| nn) crosses one of b's edges or ends strictly inside it (the 3D test
+    cannot see this: the edge is parallel to the plane); flat (m, 3) selects the edges k (corners
+    k, k + 1) to test. Touching at vertices or along edges does not count."""
+    t0 = pb[:, 0]
+    rel = pa - t0[:, None, :]
+    dist = np.abs(np.einsum('ikj,ij->ik', rel, n))                 # corner distances to the plane
+    scale = np.abs(rel).max(axis=2)
     # project onto the coordinate plane that drops the dominant normal component
-    drop = np.argmax(np.abs(n[idx]), axis=1)
-    keep = np.array([[1, 2], [0, 2], [0, 1]])[drop]
-    rows = np.arange(len(idx))[:, None]
-
-    def proj(v):
-        return v[idx][rows, keep]
-
-    a, b = proj(s0), proj(s1)
-    t = [proj(tri[:, m]) for m in range(3)]
+    drop = np.argmax(np.abs(n), axis=1)
+    keep = np.array([[1, 2], [0, 2], [0, 1]])[drop][:, None, :]
+    qa = np.take_along_axis(pa, keep, axis=2)                       # (m, 3, 2)
+    qt = np.take_along_axis(pb, keep, axis=2)
+    size_a = np.abs(qa).max(axis=2)
+    size_t = np.abs(qt).max(axis=(1, 2))
+    t = [qt[:, m] for m in range(3)]
 
     def orient(p, q, r):
         return (q[:, 0] - p[:, 0]) * (r[:, 1] - p[:, 1]) - (q[:, 1] - p[:, 1]) * (r[:, 0] - p[:, 0])
 
-    size = np.maximum(np.abs(np.stack([a, b] + t)).max(axis=(0, 2)), 1e-300)
-    e = tol * size ** 2
-    hit = np.zeros(len(idx), dtype=bool)
-    for m in range(3):
-        c, d = t[m], t[(m + 1) % 3]
-        o1, o2 = orient(a, b, c), orient(a, b, d)
-        o3, o4 = orient(c, d, a), orient(c, d, b)
-        hit |= (((o1 > e) & (o2 < -e)) | ((o1 < -e) & (o2 > e))) & (((o3 > e) & (o4 < -e)) | ((o3 < -e) & (o4 > e)))
     sign = np.sign(orient(t[0], t[1], t[2]))[:, None]
-    for pnt in (a, b):
-        o = np.stack([orient(t[m], t[(m + 1) % 3], pnt) for m in range(3)], axis=1) * sign
-        hit |= np.all(o > e[:, None], axis=1)
-    out[idx] = hit
+    out = np.zeros(len(pa), dtype=bool)
+    for k in range(3):
+        k1 = (k + 1) % 3
+        eps = 1e-9 * nn * np.maximum(np.maximum(scale[:, k], scale[:, k1]), 1e-300)
+        idx = np.flatnonzero(flat[:, k] & (dist[:, k] <= eps) & (dist[:, k1] <= eps) & (nn > 0))
+        if not len(idx):
+            continue
+        a, b = qa[idx, k], qa[idx, k1]
+        tk = [v[idx] for v in t]
+        size = np.maximum(np.maximum(np.maximum(size_a[idx, k], size_a[idx, k1]), size_t[idx]), 1e-300)
+        e = tol * size ** 2
+        hit = np.zeros(len(idx), dtype=bool)
+        for m in range(3):
+            c, d = tk[m], tk[(m + 1) % 3]
+            o1, o2 = orient(a, b, c), orient(a, b, d)
+            o3, o4 = orient(c, d, a), orient(c, d, b)
+            hit |= (((o1 > e) & (o2 < -e)) | ((o1 < -e) & (o2 > e))) & (((o3 > e) & (o4 < -e)) | ((o3 < -e) & (o4 > e)))
+        sg = sign[idx]
+        for pnt in (a, b):
+            o = np.stack([orient(tk[m], tk[(m + 1) % 3], pnt) for m in range(3)], axis=1) * sg
+            hit |= np.all(o > e[:, None], axis=1)
+        out[idx] |= hit
     return out
 
 
-def _segment_hits_triangle(s0, s1, tri, tol):
+def _segment_hits_triangle(s0, s1, tri, tol, parts=None):
+    """parts: (corner 0, edge 1, edge 2, |edge 1|, |edge 2|) of the triangles, instead of tri."""
+    if parts is None:
+        e1, e2 = tri[:, 1] - tri[:, 0], tri[:, 2] - tri[:, 0]
+        parts = (tri[:, 0], e1, e2, np.linalg.norm(e1, axis=1), np.linalg.norm(e2, axis=1))
+    t0, e1, e2, e1_len, e2_len = parts
     d = s1 - s0
-    e1, e2 = tri[:, 1] - tri[:, 0], tri[:, 2] - tri[:, 0]
     h = np.cross(d, e2)
     det = np.einsum('ij,ij->i', e1, h)
-    ok = np.abs(det) > tol * np.linalg.norm(d, axis=1) * np.linalg.norm(e1, axis=1) * np.linalg.norm(e2, axis=1)
+    ok = np.abs(det) > tol * np.linalg.norm(d, axis=1) * e1_len * e2_len
     det = np.where(ok, det, 1.0)
-    s = s0 - tri[:, 0]
+    s = s0 - t0
     uu = np.einsum('ij,ij->i', s, h) / det
     q = np.cross(s, e1)
     vv = np.einsum('ij,ij->i', d, q) / det

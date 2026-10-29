@@ -383,7 +383,6 @@ class Remesher:
         is run again with the remaining operations of the previous try only, so it shrinks."""
         n_old = len(self.x)
         exclude = np.zeros(n_old, dtype=bool)
-        before = self._wedge_vertices(self.x, self.tris)
         self._only = None
         self._batch_seed = int(self.rng.integers(2 ** 62))
         for _ in range(16):
@@ -393,8 +392,12 @@ class Remesher:
             self._changed = np.zeros(0, dtype=np.int64)
             n = op(exclude)
             self._only = self._accepted
-            bad = self._wedge_vertices(self.x, self.tris)
-            bad[:n_old] &= ~before
+            # wedges change only at edges of changed triangles; narrow wedges that were there
+            # before do not count
+            changed = np.zeros(len(self.tris), dtype=bool)
+            changed[self._changed] = True
+            bad = self._wedges_around(self.x, self.tris, changed)
+            bad[:n_old] &= ~self._wedges_around(saved['x'], saved['tris'], bad[:n_old][saved['tris']].any(axis=1))
             bad |= self._crossing_vertices(self.x, self._changed)
             if not bad.any():
                 return n
@@ -419,10 +422,21 @@ class Remesher:
             out[self.tris[pairs.ravel()].ravel()] = True
         return out
 
+    def _wedges_around(self, x, tris, tmask) -> np.ndarray:
+        """`_wedge_vertices` of the edges of the triangles in tmask, exactly: every triangle around
+        such an edge shares a vertex with a triangle in tmask."""
+        if not tmask.any():
+            return np.zeros(len(x), dtype=bool)
+        near = np.zeros(len(x), dtype=bool)
+        near[tris[tmask].ravel()] = True
+        return self._wedge_vertices(x, tris[near[tris].any(axis=1)])
+
     def _wedge_vertices(self, x, tris) -> np.ndarray:
         """Vertices of the triangles that bound a wedge narrower than min_wedge around an edge
         with three or more triangles (a line edge)."""
-        u, v, w = tris.ravel(), tris[:, [1, 2, 0]].ravel(), tris[:, [2, 0, 1]].ravel()
+        if not len(tris):
+            return np.zeros(len(x), dtype=bool)
+        u, v, w =tris.ravel(), tris[:, [1, 2, 0]].ravel(), tris[:, [2, 0, 1]].ravel()
         lo, hi = np.minimum(u, v), np.maximum(u, v)
         _, inv, cnt = unique_pairs(lo, hi, return_inverse=True, return_counts=True)
         sel = np.flatnonzero(cnt[inv] >= 3)
@@ -468,8 +482,20 @@ class Remesher:
         return edges, he_edge, n_tri, curve
 
     def _h(self, x=None) -> np.ndarray:
-        x = self.x if x is None else x
-        return self.ref_h[self.ref_vertex_tree.query(x)[1]]
+        if x is not None:
+            return self.ref_h[self.ref_vertex_tree.query(x)[1]]
+        # nearest reference vertex of the current vertices, looked up again only where they moved
+        x = self.x
+        old_x, old_idx = getattr(self, '_nearest', (np.zeros((0, 3)), np.zeros(0, dtype=np.int64)))
+        m = min(len(old_x), len(x))
+        stale = np.ones(len(x), dtype=bool)
+        stale[:m] = np.any(old_x[:m] != x[:m], axis=1)
+        idx = np.empty(len(x), dtype=np.int64)
+        idx[:m] = old_idx[:m]
+        if stale.any():
+            idx[stale] = self.ref_vertex_tree.query(x[stale])[1]
+        self._nearest = (x.copy(), idx)
+        return self.ref_h[idx]
 
     def _adjacency(self, edges, n):
         a = sparse.csr_matrix((np.ones(2 * len(edges), dtype=np.int32),
@@ -659,55 +685,66 @@ class Remesher:
                 other = has & (c != b[line_a])
                 exists = _find_rows(edges, np.sort(np.column_stack([b[line_a], c]), axis=1)) >= 0
                 ok[line_a[other & exists]] = False
-        # triangles around a that survive, with a replaced by b
+        # exclusions first: a candidate touching an excluded vertex is not evaluated further
         vt = self._vertex_triangles()
         rows = vt[a]
-        cand_idx = np.repeat(np.arange(len(a)), np.diff(rows.indptr))
-        t = rows.indices
+        all_c = np.repeat(np.arange(len(a)), np.diff(rows.indptr))
+        pv = np.repeat(all_c, 3)
+        vv = self.tris[rows.indices].ravel()
+        ok &= ~(np.bincount(pv, weights=exclude[vv], minlength=len(a)) > 0)
+        # triangles around a that survive, with a replaced by b; checked cheapest first, and a
+        # candidate is dropped with all its triangles as soon as one of them fails
+        cand_idx, t = all_c, rows.indices
         tri = self.tris[t]
-        has_b = np.any(tri == b[cand_idx, None], axis=1)
-        cand_idx, t, tri = cand_idx[~has_b], t[~has_b], tri[~has_b]
+        sel = ok[cand_idx] & ~np.any(tri == b[cand_idx, None], axis=1)
+        cand_idx, t, tri = cand_idx[sel], t[sel], tri[sel]
         new = np.where(tri == a[cand_idx, None], b[cand_idx, None], tri)
+
+        def keep(fail):
+            nonlocal cand_idx, t, tri, new
+            ok[cand_idx[fail]] = False
+            k = ok[cand_idx]
+            cand_idx, t, tri, new = cand_idx[k], t[k], tri[k], new[k]
+
+        # tiny edges (below h / 4) may leave edges up to 2 h behind
+        tiny = (np.linalg.norm(x[a] - x[b], axis=1) < h_edge[e] / 4) | val3[a]
+        p_new = x[new]
+        hv = h[new]
+        el = np.linalg.norm(p_new - p_new[:, [1, 2, 0]], axis=2)
+        factor = np.where(tiny[cand_idx], 2.0, 4 / 3)[:, None]
+        keep(~np.all(el <= factor * (hv + hv[:, [1, 2, 0]]) / 2 + 1e-12, axis=1))
         p_old, p_new = x[tri], x[new]
         n_old = np.cross(p_old[:, 1] - p_old[:, 0], p_old[:, 2] - p_old[:, 0])
         n_new = np.cross(p_new[:, 1] - p_new[:, 0], p_new[:, 2] - p_new[:, 0])
         good = _dot(n_new, n_old) > cfg.min_cos * np.linalg.norm(n_new, axis=1) * np.linalg.norm(n_old, axis=1)
         good[good] = ~self._against_reference(p_new[good], self.tnorm[t[good]])
-        hv = h[new]
-        el = np.linalg.norm(p_new - p_new[:, [1, 2, 0]], axis=2)
-        # tiny edges (below h / 4) may leave edges up to 2 h behind
-        tiny = (np.linalg.norm(x[a] - x[b], axis=1) < h_edge[e] / 4) | val3[a]
-        factor = np.where(tiny[cand_idx], 2.0, 4 / 3)[:, None]
-        good &= np.all(el <= factor * (hv + hv[:, [1, 2, 0]]) / 2 + 1e-12, axis=1)
-        ang_new, ang_old = _min_angle(p_new), _min_angle(p_old)
-        good &= (ang_new >= cfg.min_angle) | (ang_new >= ang_old)
+        # smallest angle: at least min_angle, or not smaller than before
+        g = np.flatnonzero(good)
+        ang_new = _min_angle(p_new[g])
+        low = ang_new < cfg.min_angle
+        good[g[low]] = ang_new[low] >= _min_angle(p_old[g[low]])
+        keep(~good)
         # a triangle of a grain boundary surface must not get an edge inside a box face plane
         # that is not a line edge (it would cut through the box face triangles)
         inner_surface = ~is_box_face(self.regions[self.patch[t], 1])
         if inner_surface.any():
+            good = np.ones(len(t), dtype=bool)
             bb = b[cand_idx]
             for k in range(3):
                 w = new[:, k]
-                plane = inner_surface & (w != bb) & self._in_box_plane(bb, w)
-                if plane.any():
-                    line = (_find_rows(self.cedge, np.sort(np.column_stack([bb, w]), axis=1)) >= 0) \
-                        | (_find_rows(self.cedge, np.sort(np.column_stack([a[cand_idx], w]), axis=1)) >= 0)
-                    good &= ~(plane & ~line)
+                rows_ = np.flatnonzero(good & inner_surface & (w != bb))
+                plane = rows_[self._in_box_plane(bb[rows_], w[rows_])]
+                if len(plane):
+                    line = (_find_rows(self.cedge, np.sort(np.column_stack([bb[plane], w[plane]]), axis=1)) >= 0)                         | (_find_rows(self.cedge, np.sort(np.column_stack([a[cand_idx[plane]], w[plane]]), axis=1)) >= 0)
+                    good[plane[~line]] = False
+            keep(~good)
         # a new triangle must not exist already (a closed surface of four vertices would fold
         # onto itself; the link condition alone does not catch it)
-        around_b = np.unique(vt[np.unique(b)].indices)
-        good &= ~_rows_in(np.sort(new, axis=1), np.sort(self.tris[around_b], axis=1))
-        bad = np.bincount(cand_idx, weights=~good, minlength=len(a)) > 0
-        ok &= ~bad
+        around_b = np.unique(vt[np.unique(b[cand_idx])].indices)
+        keep(_rows_in(np.sort(new, axis=1), np.sort(self.tris[around_b], axis=1)))
         # independent set: the vertices of the triangles around a
         key = self._group_key(a, b)
         prio = self._priority(key)
-        all_t = rows.indices
-        all_c = np.repeat(np.arange(len(a)), np.diff(rows.indptr))
-        tv = self.tris[all_t]                                     # (k, 3)
-        pv = np.repeat(all_c, 3)
-        vv = tv.ravel()
-        ok &= ~(np.bincount(pv, weights=exclude[vv], minlength=len(a)) > 0)
         ok = _independent_set(ok, prio, pv, vv, len(x))
         ok = self._accept_groups(key, ok, a, b)
         self.stats['refused']['collapse'] += int(np.count_nonzero(~ok))
@@ -838,12 +875,14 @@ class Remesher:
     def _guard_move(self, x, new):
         """Puts back the vertices of triangles that fold, of wedges that close and vertices that
         would leave the box or touch a box face plane they are not locked to."""
-        before = self._wedge_vertices(x, self.tris)
         outside = lambda y: np.any(~self.lock & ((y <= 0) | (y >= self.box)), axis=1)
         for _ in range(8):
             back = np.zeros(len(x), dtype=bool)
             back[self.tris[self._folded(x, new)].ravel()] = True
-            back |= self._wedge_vertices(new, self.tris) & ~before
+            # only edges of triangles with a moved vertex change their wedges; narrow wedges that
+            # were there before do not count
+            closing = self._wedges_around(new, self.tris, np.any(new != x, axis=1)[self.tris].any(axis=1))
+            back |= closing & ~self._wedges_around(x, self.tris, closing[self.tris].any(axis=1))
             back |= outside(new) & ~outside(x)
             back &= np.any(new != x, axis=1)
             if not back.any():
@@ -1136,10 +1175,13 @@ def _independent_set(ok, prio, cand_of, res_of, n_res, rounds=16):
     selected = np.zeros(len(ok), dtype=bool)
     if not len(cand_of):
         return selected
-    # rows sorted by resource, then priority: the last available row of a resource holds its best
-    order = np.lexsort((prio[cand_of], res_of))
-    order = order[ok[cand_of[order]]]
-    cand_s, res_s = cand_of[order], res_of[order]
+    # rows of ok candidates sorted by resource, then priority: the last available row of a resource
+    # holds its best (the order among equal priorities does not matter: they win or lose together)
+    rows = np.flatnonzero(ok[cand_of])
+    cand_s, res_s = cand_of[rows], res_of[rows]
+    rank = np.unique(prio[cand_s], return_inverse=True)[1].ravel()
+    order = np.argsort(res_s.astype(np.int64) * (int(rank.max(initial=0)) + 1) + rank)
+    cand_s, res_s = cand_s[order], res_s[order]
     blocked = np.zeros(n_res, dtype=bool)
     alive = np.ones(len(ok), dtype=bool)
     best = np.zeros(n_res, dtype=np.int64)

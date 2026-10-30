@@ -104,8 +104,19 @@ def mesh_rve(labels: np.ndarray, spacing: Sequence[float], periodic: Sequence[bo
     best = None
     for round_ in range(len(config.feedback) + 1):
         t = time.perf_counter()
-        tets = tet_mesh(surface, points, spacing, config.tetmesh)
-        seconds['tetmesh'] += time.perf_counter() - t
+        try:
+            tets = tet_mesh(surface, points, spacing, config.tetmesh)
+        except Exception as error:
+            # a feedback round gmsh cannot mesh (e.g. edges the remeshing made intersect) falls back
+            # to the best earlier round
+            if best is None:
+                raise
+            stats['feedback'].append({'triangles': int(len(surface.oriented)), 'error': repr(error)})
+            logging.getLogger(__name__).warning('feedback round %d failed (%r); best earlier round kept',
+                                                round_, error)
+            break
+        finally:
+            seconds['tetmesh'] += time.perf_counter() - t
         dihedral = tet_dihedral_angles(tets.mesh).min(axis=1)
         bad = np.flatnonzero(dihedral < config.min_dihedral)
         stats['feedback'].append({'triangles': int(len(surface.oriented)), 'elements': int(len(dihedral)),

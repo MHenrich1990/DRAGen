@@ -175,5 +175,30 @@ def test_generated_rve_pipeline(generated):
     assert rep['dihedral_min_deg']['p1'] >= 15.0
     best = result.stats['feedback'][result.stats['feedback_best_round']]
     assert best['below_min_dihedral'] <= 2
-    assert best['below_min_dihedral'] == min(f['below_min_dihedral'] for f in result.stats['feedback'])
+    assert best['below_min_dihedral'] == min(f['below_min_dihedral'] for f in result.stats['feedback']
+                                             if 'error' not in f)
     assert best['triangles'] < len(result.staircase.oriented)
+
+
+def test_failed_feedback_round_keeps_best(generated, monkeypatch):
+    # a feedback round gmsh cannot mesh must not discard the earlier rounds
+    pytest.importorskip('gmsh')
+    from dragen.mesh import mesher
+    from dragen.mesh.tetmesh import TetMeshConfig
+    original, calls = mesher.tet_mesh, []
+
+    def failing(*args, **kwargs):
+        calls.append(1)
+        if len(calls) == 2:
+            raise Exception('HXT 3D mesh failed')
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(mesher, 'tet_mesh', failing)
+    domain = generated.domain
+    # a threshold above the 5 degrees leaves poor elements, so the feedback reaches round 1
+    config = mesher.MeshConfig(tetmesh=TetMeshConfig(verbosity=0), min_dihedral=12.0, feedback=('coarsen',))
+    result = mesher.mesh_rve(generated.labels, domain.spacing, domain.periodic, config)
+    assert len(calls) == 2
+    assert result.stats['feedback_best_round'] == 0
+    assert 'HXT 3D mesh failed' in result.stats['feedback'][1]['error']
+    assert len(result.tets.mesh.corners) == result.stats['feedback'][0]['elements']

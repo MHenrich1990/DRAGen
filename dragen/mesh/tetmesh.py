@@ -18,7 +18,7 @@ Quality: on the unchanged smoothed triangles almost all slivers are tetrahedra w
 lie on the boundary and that bridge two nearly coplanar boundary triangles; the Netgen optimizer
 splits them with interior nodes. On the adaptively remeshed surface (M4a) HXT without Netgen gives
 fewer tetrahedra below 5 degrees, a third fewer elements and a fifth of the meshing time, for a
-p1 lower by 1-2 degrees (default since 29.10.2026, author's decision, process notes 7.12). HXT
+p1 lower by 1-2 degrees (default since 30.10.2026, author's decision, process notes 7.12). HXT
 runs on one thread: with several threads its result changes from run to run.
 
 Element size: a Distance field to all grain boundary and box surfaces, size = h0 + growth *

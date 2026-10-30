@@ -16,10 +16,12 @@ the discrete surfaces, as in gmsh tutorial t13); `body_grain` maps it back to th
 
 Quality: on the unchanged smoothed triangles almost all slivers are tetrahedra whose four nodes
 lie on the boundary and that bridge two nearly coplanar boundary triangles; the Netgen optimizer
-splits them with interior nodes. On the adaptively remeshed surface (M4a) HXT without Netgen gives
-fewer tetrahedra below 5 degrees, a third fewer elements and a fifth of the meshing time, for a
-p1 lower by 1-2 degrees (default since 30.10.2026, author's decision, process notes 7.12). HXT
-runs on one thread: with several threads its result changes from run to run.
+splits them with interior nodes. On the adaptively remeshed surface (M4a) HXT alone gives a third
+fewer elements in a fifth of the meshing time, but leaves single slivers down to 0.03 degrees and
+the coarsening feedback rarely helps; the Netgen optimizer after HXT lifts the smallest angle above
+1.2 degrees in five of the six worst RVEs and makes the feedback work again (default HXT + Netgen
+since 30.10.2026, author's decision, process notes 7.12). HXT runs on one thread: with several
+threads its result changes from run to run.
 
 Element size: a Distance field to all grain boundary and box surfaces, size = h0 + growth *
 distance, capped at max_size; h0 is the smallest voxel edge. The tetrahedra thus get coarser
@@ -58,11 +60,12 @@ class TetMeshConfig:
     max_size: Optional[float] = None
     """Largest element size in voxel edges (None: only limited by the distance to the surfaces)."""
     order: int = 2
-    optimize: str = ''
+    optimize: str = 'Netgen'
     """Extra gmsh optimizer runs after meshing, comma separated ('' none, 'Netgen', 'Relocate3D',
     'Gmsh', ...). On the unchanged smoothed surface Netgen splits the slivers spanning two boundary
     triangles (smallest dihedral angle at 100^3: 0.04 -> 0.58 degrees, p1 8.8 -> 13.3) for about
-    three times the meshing time; on the remeshed surface it is not needed (process notes 7.12)."""
+    three times the meshing time; after HXT on the remeshed surface it removes the worst slivers
+    for about half more elements (process notes 7.12)."""
     algorithm: int = 10
     """gmsh Mesh.Algorithm3D: 1 Delaunay, 4 Frontal, 10 HXT."""
     threads: int = 1

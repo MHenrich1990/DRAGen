@@ -207,14 +207,15 @@ class HelperFunctions:
         df2['Axes1'] = (df2[columns[0]] * df2[columns[1]] / np.pi) ** 0.5  # Major
         df2['Axes2'] = df2[columns[0]] / (np.pi * df2['Axes1'])
         # Switch axis in 45 - 135
+        # pandas 3: no positional row[2], and chained assignment no longer writes through; iat keeps
+        # the original semantics (j is the row label, used as a position as before)
+        ax1, ax2 = df2.columns.get_loc('Axes1'), df2.columns.get_loc('Axes2')
         for j, row in df2.iterrows():
-            if 45 < row[2] <= 135:
-                temp1 = df2['Axes2'].iloc[j]
-                temp2 = df2['Axes1'].iloc[j]
-                df2['Axes1'].iloc[j] = temp1
-                df2['Axes2'].iloc[j] = temp2
-            else:
-                pass
+            if 45 < row.iloc[2] <= 135:
+                temp1 = df2.iat[j, ax2]
+                temp2 = df2.iat[j, ax1]
+                df2.iat[j, ax1] = temp1
+                df2.iat[j, ax2] = temp2
         # Set c = a due to coming rotation - TODO: Setzt das voraus, muss bei den Trainingsdaten passen
         df2['Axes3'] = df2['Axes1']
         data = df2.copy()

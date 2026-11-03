@@ -152,6 +152,9 @@ class GanSource(GrainSource):
 
     def _load(self):
         if self._gan is None:
+            from dragen._extras import headless_matplotlib, require
+            require('torch', 'ml')
+            headless_matplotlib()                           # the GAN code imports pyplot
             from InputGenerator.C_WGAN_GP import WGANCGP   # pulls in torch, so only on demand
             gan = WGANCGP(df_list=[], storepath='.', num_features=3, gen_iters=500000)
             gan.load_trained_states(single=False, file_list=[self.path])

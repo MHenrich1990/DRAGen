@@ -13,6 +13,8 @@ happen today when tests/scenarios/run_all_test_cases.py runs multiple scenarios 
 """
 import pytest
 
+pytest.importorskip('pyvista', reason="legacy generator, needs the extra 'gui'")
+
 from dragen.run import Run
 from dragen.utilities.InputInfo import RveInfo
 

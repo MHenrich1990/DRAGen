@@ -5,6 +5,7 @@
 <!--![logo](docs/GUI.PNG)-->
 
  [**Installation**](#Installation)
+| [**Use as a library**](#use-as-a-library)
 | [**Related Projects**](#Related-Projects)
 | [**Tutorial**](Tutorial)
 
@@ -112,6 +113,60 @@ Run DRAGen:<br>
 ```
 (DRAGen)....$ python DRAGen.py
 ```
+
+## Use as a library
+
+DRAGen can be called from Python without a GUI through `dragen.api`. The core needs only numpy,
+scipy, pandas, pyyaml, gmsh and meshio; everything else is an optional extra:
+
+| Extra | For |
+|---|---|
+| `ml` | grain sources from trained GANs (`.pkl`): torch, geomloss, qhoptim, matplotlib (Agg), seaborn, tqdm |
+| `damask` | `export_damask` |
+| `extra` | `export_exodus` (netCDF4), rarely used helpers of the legacy code |
+| `gui` | PyQt GUI `DRAGen.py` and the legacy generator `DRAGen_nogui.py` |
+| `test` | pytest |
+
+```
+pip install -e ".[ml,damask]"          # or, from another uv project: uv add --editable "../DRAGen[ml,damask]"
+```
+
+Example (run from the repository root, it uses the trained GANs in `ExampleInput`):
+
+```python
+from pathlib import Path
+from dragen.api import PhaseSpec, RVESpec, generate_rve
+from dragen.export import export_damask, export_vtu
+
+spec = RVESpec(
+    box_size_m=5.5e-6,              # cube edge in metres (or (x, y, z))
+    resolution=16,                  # voxels along x
+    phases=[PhaseSpec('ferrite', 0.7, Path('ExampleInput/Ferrite/TrainedData_Ferrite.pkl')),
+            PhaseSpec('martensite', 0.3, Path('ExampleInput/Martensite/TrainedData_Martensite.pkl'))],
+    mesh='tet',                     # 'voxel' (default) or also a tetrahedral mesh
+    seed=1,
+)
+rve = generate_rve(spec)
+print(rve.grain_ids.shape, rve.orientations.shape, rve.tet_mesh.cells.shape)
+export_damask(rve, Path('out/damask'))  # grid.vti + material.yaml
+export_vtu(rve, Path('out/rve'))        # rve.vtu; also export_gmsh, export_exodus
+```
+
+Conventions (details in the docstring of `dragen/api.py`):
+
+* Lengths in metres; the grain sources (GAN, CSV) stay in micrometres.
+* Axes x = RD, y = TD, z = ND; `grain_ids[i, j, k]` is the voxel at (x, y, z).
+* Grain IDs 1 … G; row g − 1 of `orientations` and `phase_ids` belongs to grain g
+  (`rve.orientation_of(ids)` does the lookup).
+* Orientations as unit quaternions (w, x, y, z), w ≥ 0, active rotation crystal → sample. These are
+  the same four numbers DAMASK uses for the orientation; `euler_bunge_deg` holds the Bunge angles.
+* Orientations come from the grain source if it has `phi1, PHI, phi2`, from
+  `PhaseSpec(orientations=...)` (a CSV of measured orientations) if given, otherwise they are random.
+* Same spec, same input files and same seed give the same RVE.
+
+The library writes nothing to stdout; messages go to `logging`. `generate_rve(spec, out_dir)` also
+saves `rve.npz` and `metadata.json` (version, git commit, seed, SHA-256 of spec and input files,
+run times, warnings).
 
 ## Related Projects
 

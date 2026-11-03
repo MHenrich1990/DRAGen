@@ -11,8 +11,9 @@ The assertions are the invariants every stage claims to maintain, so a port slip
 dragen/substructure/ surfaces here rather than three hours into a scenario run.
 """
 import numpy as np
-import pyvista as pv
 import pytest
+
+pv = pytest.importorskip('pyvista', reason="substructure code, needs the extra 'gui'")
 
 from dragen.substructure import blocks, orientation, packets
 from dragen.substructure.config import SubsConfig

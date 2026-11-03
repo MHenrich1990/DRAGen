@@ -1,6 +1,8 @@
 import importlib
 import pytest
 
+pytest.importorskip('pyvista', reason="legacy generator, needs the extra 'gui'")
+
 from tests.scenarios.assertions import verify_rve_output
 
 # Curated subset covering every distinct feature area at its cheapest parameterization: each

@@ -107,6 +107,7 @@ def test_imprinted_ring_is_slave_of_the_real_ring():
 
 
 def test_pyvista_export(tmp_path):
+    pytest.importorskip('pyvista')
     model = model_of(corpus.ring_triple_line())
     blocks = model.to_pyvista()
     assert blocks['surfaces'].n_cells == len(model.mesh.triangles)

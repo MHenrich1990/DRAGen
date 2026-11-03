@@ -9,6 +9,8 @@ import sys
 
 import pytest
 
+pytest.importorskip('pyvista', reason="legacy generator, needs the extra 'gui'")
+
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
 sys.path.insert(0, os.path.join(REPO_ROOT, 'benchmarks'))
 

@@ -1,0 +1,389 @@
+"""Library interface: one call from an RVE specification to voxel labels, orientations and,
+optionally, a tetrahedral mesh. No GUI, no change of the working directory, no global state, no
+output to stdout (messages go to `logging`).
+
+Conventions of this interface (the rest of DRAGen works in micrometres and Bunge Euler angles):
+
+Lengths
+    Metres. The grain sources (GAN .pkl, CSV) stay in micrometres, as everywhere in DRAGen.
+Axes
+    Index (i, j, k) of `grain_ids` is (x, y, z); x = rolling direction (RD), y = transverse
+    direction (TD), z = normal direction (ND). Grain shapes are tilted by their angle alpha about
+    ND. DRAGen does not reorient the input: the grain data must be given in this frame (GAN and
+    CSV sources trained/measured in RD x ND sections are).
+Grain IDs
+    1 ... G, as in DRAGen and the solver files. Row g - 1 of `orientations` and `phase_ids`
+    belongs to grain g; `RVEResult.orientation_of(ids)` does the lookup.
+Orientations
+    Unit quaternions (w, x, y, z) with w >= 0, ACTIVE rotation from the crystal into the sample
+    frame: v_sample = q * v_crystal * q^-1. The columns of its rotation matrix are the crystal
+    axes [100], [010], [001] expressed in RD, TD, ND (Hamilton product, as scipy). Equivalent to
+    Bunge Euler angles (phi1, PHI, phi2), which describe the passive rotation sample -> crystal.
+    The four numbers are the same as DAMASK's quaternion of that orientation: DAMASK reads them
+    as passive sample -> crystal with its sign convention P = -1, which is the same rotation.
+    Example: Goss, Euler (0, 45, 0) deg -> q = (cos 22.5, sin 22.5, 0, 0), [100] || RD, [011] || ND.
+Reproducibility
+    The same spec (and the same source files) gives the same RVE. The tetrahedral mesh is
+    reproducible because gmsh runs on one thread.
+"""
+import dataclasses
+import hashlib
+import json
+import logging
+import subprocess
+import time
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Dict, List, Literal, Optional, Sequence, Tuple, Union
+
+import numpy as np
+import pandas as pd
+from scipy.spatial.transform import Rotation
+
+from dragen.config.phases import Phase
+from dragen.config.rve import BoxConfig, PhaseConfig, RveConfig
+
+log = logging.getLogger(__name__)
+
+MATRIX_PHASES = ('ferrite', 'martensite', 'pearlite', 'bainite', 'austenite')
+"""Phase names a PhaseSpec accepts (DRAGen's fixed phases; bands and inclusions are features)."""
+
+_EULER = ['phi1', 'PHI', 'phi2']
+
+
+# ---------------------------------------------------------------------- specification
+
+@dataclass(frozen=True)
+class PhaseSpec:
+    """One phase of the RVE.
+
+    name: one of MATRIX_PHASES.
+    fraction: volume fraction; the fractions of all phases add up to 1.
+    source: grain data in micrometres. A trained WGAN (.pkl, extra 'ml') or a CSV with one row per
+        measured grain: a (semi-axis), optional b, c, alpha (tilt about ND, degrees) and
+        phi1, PHI, phi2 (Bunge, degrees). Grain size, shape and, if present, orientation are drawn
+        together, so their correlations are kept.
+    orientations: optional CSV with columns phi1, PHI, phi2 (Bunge, degrees), one row per measured
+        grain. If given, every grain of this phase gets an orientation drawn from it, replacing
+        those of the source. Without it the source's orientations are used, or random ones if it
+        has none.
+    """
+
+    name: str
+    fraction: float
+    source: Path
+    orientations: Optional[Path] = None
+
+    def __post_init__(self):
+        name = str(self.name).lower()
+        if name not in MATRIX_PHASES:
+            raise ValueError(f'unknown phase {self.name!r}, expected one of {MATRIX_PHASES}')
+        object.__setattr__(self, 'name', name)
+        object.__setattr__(self, 'source', Path(self.source))
+        if self.orientations is not None:
+            object.__setattr__(self, 'orientations', Path(self.orientations))
+
+
+@dataclass(frozen=True)
+class RVESpec:
+    """What generate_rve builds.
+
+    box_size_m: edge length of a cube, or (x, y, z) edge lengths, in metres.
+    resolution: voxels along x; voxels are cubes, so y and z get size / voxel size (rounded).
+        The tetrahedral mesh is built on these voxels.
+    phases: the phases with their sources and fractions.
+    periodic: all axes, or per axis (x, y, z). A non-periodic axis is a free surface.
+    mesh: 'voxel' (labels only) or 'tet' (also a tetrahedral mesh with smoothed grain boundaries).
+    tet_order: 1 (4-node) or 2 (10-node) tetrahedra.
+    seed: random seed; the same seed and input give the same RVE.
+    """
+
+    box_size_m: Union[float, Tuple[float, float, float]]
+    resolution: int
+    phases: Sequence[PhaseSpec]
+    periodic: Union[bool, Tuple[bool, bool, bool]] = True
+    mesh: Literal['voxel', 'tet'] = 'voxel'
+    tet_order: Literal[1, 2] = 2
+    seed: int = 0
+
+    def __post_init__(self):
+        size = self.box_size_m
+        size = (float(size),) * 3 if np.isscalar(size) else tuple(float(s) for s in size)
+        if len(size) != 3:
+            raise ValueError(f'box_size_m needs 1 or 3 entries, got {len(size)}')
+        object.__setattr__(self, 'box_size_m', size)
+        periodic = self.periodic
+        periodic = (bool(periodic),) * 3 if isinstance(periodic, (bool, np.bool_)) else tuple(bool(p) for p in periodic)
+        object.__setattr__(self, 'periodic', periodic)
+        object.__setattr__(self, 'phases', tuple(self.phases))
+        if int(self.resolution) < 2:
+            raise ValueError(f'resolution must be at least 2 voxels, got {self.resolution}')
+        if self.mesh not in ('voxel', 'tet'):
+            raise ValueError(f"mesh must be 'voxel' or 'tet', got {self.mesh!r}")
+        if self.tet_order not in (1, 2):
+            raise ValueError(f'tet_order must be 1 or 2, got {self.tet_order}')
+        names = [p.name for p in self.phases]
+        if len(set(names)) != len(names):
+            raise ValueError(f'phases listed twice: {names}')
+        self.to_config()            # all remaining checks (fractions, box) live in RveConfig
+
+    def to_config(self) -> RveConfig:
+        """The DRAGen configuration (micrometres) this spec stands for."""
+        size_um = tuple(s * 1e6 for s in self.box_size_m)
+        box = BoxConfig(size=size_um, resolution=int(self.resolution) / size_um[0], periodic=self.periodic)
+        phases = tuple(PhaseConfig(phase=p.name, source=str(p.source), fraction=p.fraction) for p in self.phases)
+        return RveConfig(box=box, phases=phases, seed=int(self.seed))
+
+    def to_dict(self) -> dict:
+        def plain(value):
+            if isinstance(value, Path):
+                return value.as_posix()
+            if isinstance(value, (list, tuple)):
+                return [plain(v) for v in value]
+            if isinstance(value, dict):
+                return {k: plain(v) for k, v in value.items()}
+            return value
+        return plain(dataclasses.asdict(self))
+
+
+# ---------------------------------------------------------------------- result
+
+@dataclass
+class TetMesh:
+    """Tetrahedral mesh with smoothed grain boundaries.
+
+    points: (P, 3) float64, metres, box from 0 to box_size_m.
+    cells: (E, 4) or (E, 10) int64, node order of VTK/Abaqus/meshio ('tetra', 'tetra10'):
+        corners 0-3, midside nodes 4 (0-1), 5 (1-2), 6 (0-2), 7 (0-3), 8 (1-3), 9 (2-3).
+    grain_ids: (E,) int32, grain of every element (same IDs as RVEResult.grain_ids).
+    periodic_pairs: per periodic axis (0 = x, 1 = y, 2 = z) an (n, 2) int64 array of node
+        indices: node on the face at 0, node at the same place on the opposite face.
+    """
+
+    points: np.ndarray
+    cells: np.ndarray
+    grain_ids: np.ndarray
+    periodic_pairs: Dict[int, np.ndarray]
+
+    @property
+    def cell_type(self) -> str:
+        return 'tetra10' if self.cells.shape[1] == 10 else 'tetra'
+
+
+@dataclass
+class RVEResult:
+    """A generated RVE; conventions in the module docstring.
+
+    grain_ids: (nx, ny, nz) int32, grain ID 1 ... G per voxel.
+    orientations: (G, 4) float64 unit quaternions (w, x, y, z), crystal -> sample, active.
+    euler_bunge_deg: (G, 3) float64, the same orientations as Bunge Euler angles in degrees.
+    phase_ids: (G,) int32 DRAGen phase ID per grain (1 ferrite, 2 martensite, 3 pearlite,
+        4 bainite, 5 austenite); `phase_names` maps them to names.
+    box_size_m: (x, y, z) edge lengths in metres.
+    tet_mesh: only for spec.mesh == 'tet'.
+    metadata: dragen version, git commit, seed, SHA-256 of the spec and the input files, run
+        times, warnings, phase fractions.
+    """
+
+    grain_ids: np.ndarray
+    orientations: np.ndarray
+    euler_bunge_deg: np.ndarray
+    phase_ids: np.ndarray
+    phase_names: Dict[int, str]
+    box_size_m: Tuple[float, float, float]
+    periodic: Tuple[bool, bool, bool]
+    tet_mesh: Optional[TetMesh] = None
+    metadata: dict = field(default_factory=dict)
+
+    @property
+    def n_grains(self) -> int:
+        return len(self.orientations)
+
+    @property
+    def voxel_size_m(self) -> Tuple[float, float, float]:
+        return tuple(s / n for s, n in zip(self.box_size_m, self.grain_ids.shape))
+
+    def orientation_of(self, grain_ids) -> np.ndarray:
+        """Quaternions of the given grain IDs (any shape), e.g. per voxel or per element."""
+        return self.orientations[np.asarray(grain_ids) - 1]
+
+    def save(self, out_dir: Path) -> None:
+        """rve.npz (arrays, metres) and metadata.json into out_dir."""
+        out_dir = Path(out_dir)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        arrays = dict(grain_ids=self.grain_ids, orientations=self.orientations,
+                      euler_bunge_deg=self.euler_bunge_deg, phase_ids=self.phase_ids,
+                      box_size_m=np.array(self.box_size_m), periodic=np.array(self.periodic))
+        if self.tet_mesh is not None:
+            arrays.update(tet_points=self.tet_mesh.points, tet_cells=self.tet_mesh.cells,
+                          tet_grain_ids=self.tet_mesh.grain_ids,
+                          **{f'tet_periodic_pairs_{a}': p for a, p in self.tet_mesh.periodic_pairs.items()})
+        np.savez_compressed(out_dir / 'rve.npz', **arrays)
+        meta = dict(self.metadata, phase_names={str(k): v for k, v in self.phase_names.items()})
+        (out_dir / 'metadata.json').write_text(json.dumps(meta, indent=2), encoding='utf-8')
+
+
+# ---------------------------------------------------------------------- generation
+
+def euler_to_quaternion(euler_bunge_deg: np.ndarray) -> np.ndarray:
+    """Bunge Euler angles (degrees) -> unit quaternions (w, x, y, z), active crystal -> sample,
+    w >= 0. scipy's intrinsic 'ZXZ' matrix Rz(phi1) Rx(PHI) Rz(phi2) is the transpose of the
+    Bunge matrix g (sample -> crystal), i.e. exactly the rotation crystal -> sample."""
+    xyzw = Rotation.from_euler('ZXZ', np.asarray(euler_bunge_deg, float).reshape(-1, 3), degrees=True) \
+        .as_quat(canonical=True)
+    return np.ascontiguousarray(xyzw[:, [3, 0, 1, 2]])
+
+
+def generate_rve(spec: RVESpec, out_dir: Optional[Path] = None) -> RVEResult:
+    """Generate the RVE described by `spec`. With out_dir, also save it there (RVEResult.save)."""
+    from dragen.pipeline import generate
+
+    start = time.perf_counter()
+    config = spec.to_config()
+    log.info('generating RVE: %s voxels, %d phases, seed %d', config.box.shape, len(spec.phases), spec.seed)
+    with _capture_warnings() as warnings:
+        result = generate(config)
+        grains = result.grains
+        labels = result.labels.astype(np.int32, copy=False)
+        euler = np.array(grains.euler, dtype=np.float64)
+        phase_ids = np.asarray(grains.phase, dtype=np.int32)
+        _orientations_from_files(spec, euler, phase_ids)
+        seconds = dict(result.seconds)
+        metadata_mesh = {}
+        tet = None
+        if spec.mesh == 'tet':
+            t = time.perf_counter()
+            tet, metadata_mesh = _tet_mesh(labels, config.box, spec.tet_order)
+            seconds['tet_mesh'] = time.perf_counter() - t
+    seconds['total'] = time.perf_counter() - start
+
+    counts = np.bincount(labels.ravel(), minlength=len(grains) + 1)[1:]
+    fractions = {Phase(p).name.lower(): float(counts[phase_ids == p].sum() / labels.size)
+                 for p in np.unique(phase_ids)}
+    out = RVEResult(
+        grain_ids=labels,
+        orientations=euler_to_quaternion(euler),
+        euler_bunge_deg=euler,
+        phase_ids=phase_ids,
+        phase_names={int(p): Phase(p).name.lower() for p in Phase},
+        box_size_m=spec.box_size_m,
+        periodic=spec.periodic,
+        tet_mesh=tet,
+        metadata={
+            'dragen_version': _version(),
+            'git_commit': _git_commit(),
+            'seed': spec.seed,
+            'spec': spec.to_dict(),
+            'spec_sha256': _spec_hash(spec),
+            'n_grains': int(len(grains)),
+            'shape': list(labels.shape),
+            'phase_fractions': fractions,
+            'seconds': seconds,
+            'warnings': warnings,
+            **metadata_mesh,
+        },
+    )
+    log.info('RVE with %d grains in %.1f s', out.n_grains, seconds['total'])
+    if out_dir is not None:
+        out.save(Path(out_dir))
+    return out
+
+
+def _orientations_from_files(spec: RVESpec, euler: np.ndarray, phase_ids: np.ndarray) -> None:
+    """Replace, per phase with an orientation file, the Euler angles of its grains by rows drawn
+    from that file (with replacement). Own random stream, so the geometry does not depend on it."""
+    rng = np.random.default_rng([int(spec.seed), 1])
+    for p in spec.phases:
+        if p.orientations is None:
+            continue
+        data = pd.read_csv(p.orientations)
+        missing = [c for c in _EULER if c not in data]
+        if missing:
+            raise ValueError(f'{p.orientations}: columns {missing} missing (need phi1, PHI, phi2 in degrees)')
+        table = data[_EULER].dropna().to_numpy(dtype=float)
+        if not len(table):
+            raise ValueError(f'{p.orientations}: no orientations')
+        mine = np.flatnonzero(phase_ids == int(Phase.parse(p.name)))
+        euler[mine] = table[rng.integers(len(table), size=len(mine))]
+
+
+def _tet_mesh(labels: np.ndarray, box: BoxConfig, order: int):
+    from dragen.mesh.mesher import MeshConfig, mesh_rve
+    from dragen.mesh.tetmesh import TetMeshConfig, periodic_node_pairs
+
+    result = mesh_rve(labels, box.spacing, box.periodic,
+                      MeshConfig(tetmesh=TetMeshConfig(order=order, verbosity=0)))
+    mesh = result.tets.mesh
+    axes = [a for a, p in enumerate(box.periodic) if p]
+    pairs = periodic_node_pairs(mesh.points, box.size, axes) if axes else {}
+    tet = TetMesh(points=np.asarray(mesh.points, dtype=np.float64) * 1e-6,
+                  cells=np.asarray(mesh.cells, dtype=np.int64),
+                  grain_ids=np.asarray(mesh.grain, dtype=np.int32),
+                  periodic_pairs={a: np.asarray(p, dtype=np.int64) for a, p in pairs.items()})
+    feedback = result.stats.get('feedback', [])
+    best = feedback[result.stats.get('feedback_best_round', 0)] if feedback else {}
+    meta = {'tet_mesh': {'elements': int(len(mesh.cells)), 'nodes': int(len(mesh.points)),
+                         'min_dihedral_deg': best.get('min_dihedral'),
+                         'below_min_dihedral': best.get('below_min_dihedral'),
+                         'cleanup_changed_voxels': result.stats.get('cleanup', {}).get('changed_voxels')}}
+    return tet, meta
+
+
+class _capture_warnings:
+    """Collects WARNING records of the dragen loggers during a run, for the metadata."""
+
+    def __enter__(self) -> List[str]:
+        self.records: List[str] = []
+        records = self.records
+
+        class Handler(logging.Handler):
+            def emit(self, record):
+                records.append(record.getMessage())
+
+        self.handler = Handler(level=logging.WARNING)
+        self.logger = logging.getLogger('dragen')
+        self.logger.addHandler(self.handler)
+        return self.records
+
+    def __exit__(self, *exc):
+        self.logger.removeHandler(self.handler)
+        return False
+
+
+def _file_hash(path: Path) -> Optional[str]:
+    try:
+        return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+    except OSError:
+        return None
+
+
+def _spec_hash(spec: RVESpec) -> str:
+    """SHA-256 over the spec and the content of every input file (so a changed source changes it)."""
+    files = {}
+    for p in spec.phases:
+        files[p.source.as_posix()] = _file_hash(p.source)
+        if p.orientations is not None:
+            files[p.orientations.as_posix()] = _file_hash(p.orientations)
+    payload = json.dumps({'spec': spec.to_dict(), 'files': files}, sort_keys=True)
+    return hashlib.sha256(payload.encode('utf-8')).hexdigest()
+
+
+def _version() -> Optional[str]:
+    try:
+        from importlib.metadata import version
+        return version('dragen')
+    except Exception:
+        return None
+
+
+def _git_commit() -> Optional[str]:
+    """Commit of the DRAGen checkout, with '-dirty' for uncommitted changes; None outside git."""
+    root = Path(__file__).resolve().parent.parent
+    try:
+        commit = subprocess.run(['git', '-C', str(root), 'rev-parse', 'HEAD'], capture_output=True,
+                                text=True, timeout=5, check=True).stdout.strip()
+        dirty = subprocess.run(['git', '-C', str(root), 'status', '--porcelain', '--untracked-files=no'],
+                               capture_output=True, text=True, timeout=5).stdout.strip()
+        return commit + ('-dirty' if dirty else '')
+    except Exception:
+        return None

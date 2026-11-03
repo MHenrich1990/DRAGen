@@ -126,6 +126,21 @@ def test_coarsen_near_makes_the_surface_coarser_there():
     assert all(v == 0 for v in check(model, coarse, (1, 1, 1))['errors'].values())
 
 
+
+def test_size_field_scales_once_for_clustered_centres():
+    # O52: three poor elements close together double the size there once, not 2**3 times
+    labels = np.ones((12, 12, 12), dtype=np.int32)
+    labels[6:] = 2
+    labels, _ = ManifoldCleaner((False,) * 3).run(labels)
+    model = build_model(build_topology(labels, (1, 1, 1), (False,) * 3))
+    smoothed = smooth(model, (1, 1, 1))
+    remesher = Remesher(model, smoothed.points, labels, (1, 1, 1), smoothed.grain_volume_target)
+    h = remesher.ref_h.copy()
+    remesher._scale_size_near(np.array([[6.0, 6.0, 6.0], [6.2, 6.0, 6.0], [6.0, 6.2, 6.0]]), 2.0)
+    ratio = remesher.ref_h / h
+    assert ratio.max() == 2.0
+    assert np.all((ratio == 1.0) | (ratio == 2.0))
+
 def test_shared_vertex_crossings_are_found():
     # two triangles sharing vertex 0; the second one passes through the first
     pts = np.array([[0, 0, 0], [2, 0, 0], [0, 2, 0], [0.5, 0.5, -1], [0.5, 0.5, 1]], dtype=float)
@@ -145,6 +160,23 @@ def test_vertex_touching_a_foreign_triangle_is_found():
     tris = np.array([[0, 1, 2], [3, 4, 0]])
     assert len(self_intersection_pairs(pts, tris, shared_vertex=True, touching=True)) == 0
 
+
+
+def test_edge_crossing_a_foreign_edge_is_found():
+    # O51: the edge (3, 4) of the second triangle (in the plane x = y) crosses the edge (1, 2) of
+    # the first one at (1, 1, 0), inside both edges; otherwise the triangles stay apart. gmsh HXT
+    # rejects this ("Two segments intersect")
+    pts = np.array([[0, 0, 0], [2, 0, 0], [0, 2, 0], [1, 1, -1], [1, 1, 1], [3, 3, 0]], dtype=float)
+    tris = np.array([[0, 1, 2], [3, 4, 5]])
+    assert len(self_intersection_pairs(pts, tris, shared_vertex=True)) == 0
+    assert len(self_intersection_pairs(pts, tris, shared_vertex=True, touching=True)) == 1
+    # moved slightly away from the first triangle: no contact
+    pts[3:, 0] += 1e-3
+    assert len(self_intersection_pairs(pts, tris, shared_vertex=True, touching=True)) == 0
+    # an edge ending at a shared corner does not count
+    pts = np.array([[0, 0, 0], [2, 0, 0], [0, 2, 0], [0, 0, 1], [-1, -1, 0]], dtype=float)
+    tris = np.array([[0, 1, 2], [0, 3, 4]])
+    assert len(self_intersection_pairs(pts, tris, shared_vertex=True, touching=True)) == 0
 
 @pytest.fixture(scope='module')
 def generated():

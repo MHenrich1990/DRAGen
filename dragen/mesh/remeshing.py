@@ -367,13 +367,16 @@ class Remesher:
         return self.run()
 
     def _scale_size_near(self, centres, factor, floor=0.0):
+        """Scales the size field once at every reference vertex within 2 h of any centre (also
+        where several centres are close: no factor**k for k clustered poor elements, O52)."""
         if not len(centres):
             return
         near = self.ref_vertex_tree.query_ball_point(centres, 2 * self.ref_h.max())
+        sel = np.zeros(len(self.ref_h), dtype=bool)
         for c, idx in zip(centres, near):
             idx = np.asarray(idx, dtype=np.int64)
-            sel = idx[np.linalg.norm(self.ref_x[idx] - c, axis=1) < 2 * self.ref_h[idx]]
-            self.ref_h[sel] = np.maximum(self.ref_h[sel] * factor, floor)
+            sel[idx[np.linalg.norm(self.ref_x[idx] - c, axis=1) < 2 * self.ref_h[idx]]] = True
+        self.ref_h[sel] = np.maximum(self.ref_h[sel] * factor, floor)
 
     _STATE = ('x', 's', 'curve_start', 'tris', 'patch', 'tnorm', 'kind', 'entity', 'lock', 'shift', 'cls', 'anchor', 'cedge', 'ccurve')
 

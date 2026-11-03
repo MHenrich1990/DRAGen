@@ -246,7 +246,9 @@ def self_intersection_pairs(points: np.ndarray, triangles: np.ndarray, candidate
     one vertex are tested as well (only pairs sharing an edge are skipped); a hit at the shared
     vertex itself does not count. With touching, a corner of one triangle that lies on the other
     one (inside or on its boundary) but is none of its corners counts as well: a T-junction, which
-    a volume mesher rejects (gmsh HXT: "a vertex and a facet intersect")."""
+    a volume mesher rejects (gmsh HXT: "a vertex and a facet intersect"), and so does an edge that
+    crosses an edge of the other triangle in a single point inside both (gmsh HXT: "Two segments
+    intersect", O51)."""
     p = points[triangles]
     lo, hi = p.min(axis=1), p.max(axis=1)
     pairs = _box_pairs(lo, hi, candidates)
@@ -297,7 +299,7 @@ def self_intersection_pairs(points: np.ndarray, triangles: np.ndarray, candidate
                 hit[rows] |= _corners_on_triangle(p[ra], p[rb], normal[rb], (near & ~own)[rows], tol)
         tb = (p[b, 0], e1[b], e2[b], e1_len[b], e2_len[b])
         for k in range(3):
-            hit |= _segment_hits_triangle(p[a, k], p[a, (k + 1) % 3], None, tol, tb)
+            hit |= _segment_hits_triangle(p[a, k], p[a, (k + 1) % 3], None, tol, tb, closed=touching)
         flat = near & near[:, [1, 2, 0]]                        # edge k: corners k and k + 1
         rows = np.flatnonzero(flat.any(axis=1))
         if len(rows):
@@ -469,8 +471,10 @@ def _coplanar_edges_hit_triangle(pa, pb, n, nn, flat, tol):
     return out
 
 
-def _segment_hits_triangle(s0, s1, tri, tol, parts=None):
-    """parts: (corner 0, edge 1, edge 2, |edge 1|, |edge 2|) of the triangles, instead of tri."""
+def _segment_hits_triangle(s0, s1, tri, tol, parts=None, closed=False):
+    """parts: (corner 0, edge 1, edge 2, |edge 1|, |edge 2|) of the triangles, instead of tri.
+    With closed, a hit on the triangle's boundary counts as well (the segment's own ends still do
+    not): an edge that crosses an edge of the triangle in a single point."""
     if parts is None:
         e1, e2 = tri[:, 1] - tri[:, 0], tri[:, 2] - tri[:, 0]
         parts = (tri[:, 0], e1, e2, np.linalg.norm(e1, axis=1), np.linalg.norm(e2, axis=1))
@@ -485,7 +489,8 @@ def _segment_hits_triangle(s0, s1, tri, tol, parts=None):
     q = np.cross(s, e1)
     vv = np.einsum('ij,ij->i', d, q) / det
     tt = np.einsum('ij,ij->i', e2, q) / det
-    return ok & (uu > tol) & (vv > tol) & (uu + vv < 1 - tol) & (tt > tol) & (tt < 1 - tol)
+    lim = -tol if closed else tol
+    return ok & (uu > lim) & (vv > lim) & (uu + vv < 1 - lim) & (tt > tol) & (tt < 1 - tol)
 
 
 def interface_report(mesh: InterfaceMesh, reference_volume: Optional[Dict[int, float]] = None,

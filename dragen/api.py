@@ -297,7 +297,28 @@ class RVEResult:
                           **{f'tet_periodic_pairs_{a}': p for a, p in self.tet_mesh.periodic_pairs.items()})
         np.savez_compressed(out_dir / 'rve.npz', **arrays)
         meta = dict(self.metadata, phase_names={str(k): v for k, v in self.phase_names.items()})
-        (out_dir / 'metadata.json').write_text(json.dumps(meta, indent=2), encoding='utf-8')
+        (out_dir / 'metadata.json').write_text(json.dumps(meta, indent=2, default=_json_default), encoding='utf-8')
+
+    @classmethod
+    def load(cls, out_dir: Path) -> 'RVEResult':
+        """Inverse of save."""
+        out_dir = Path(out_dir)
+        data = np.load(out_dir / 'rve.npz')
+        meta = json.loads((out_dir / 'metadata.json').read_text(encoding='utf-8'))
+        names = {int(k): v for k, v in meta.pop('phase_names').items()}
+        tet = None
+        if 'tet_cells' in data:
+            pairs = {int(k.rsplit('_', 1)[1]): data[k] for k in data.files if k.startswith('tet_periodic_pairs_')}
+            tet = TetMesh(points=data['tet_points'], cells=data['tet_cells'], grain_ids=data['tet_grain_ids'],
+                          periodic_pairs=pairs)
+        return cls(grain_ids=data['grain_ids'], orientations=data['orientations'],
+                   euler_bunge_deg=data['euler_bunge_deg'], phase_ids=data['phase_ids'], phase_names=names,
+                   box_size_m=tuple(float(s) for s in data['box_size_m']),
+                   periodic=tuple(bool(p) for p in data['periodic']),
+                   band_ids=data['band_ids'] if 'band_ids' in data else None,
+                   radii_m=data['radii_m'] if 'radii_m' in data else None,
+                   alpha_deg=data['alpha_deg'] if 'alpha_deg' in data else None,
+                   tet_mesh=tet, metadata=meta)
 
 
 # ---------------------------------------------------------------------- generation
@@ -478,3 +499,14 @@ def _git_commit() -> Optional[str]:
         return commit + ('-dirty' if dirty else '')
     except Exception:
         return None
+
+
+def _json_default(value):
+    """numpy scalars and arrays in metadata (e.g. from a configuration) as plain JSON."""
+    if isinstance(value, np.ndarray):
+        return value.tolist()
+    if isinstance(value, np.generic):
+        return value.item()
+    if isinstance(value, Path):
+        return value.as_posix()
+    raise TypeError(f'{type(value).__name__} is not JSON serializable')

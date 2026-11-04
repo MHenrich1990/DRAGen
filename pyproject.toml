@@ -20,6 +20,9 @@ dependencies = [
     "meshio>=5.3",
 ]
 
+[project.scripts]
+dragen = "dragen.cli:main"
+
 [project.optional-dependencies]
 # DAMASK grid export (dragen.export.export_damask)
 damask = ["damask>=3.0.2"]

@@ -123,7 +123,7 @@ scipy, pandas, pyyaml, gmsh and meshio; everything else is an optional extra:
 |---|---|
 | `ml` | grain sources from trained GANs (`.pkl`): torch, geomloss, qhoptim, matplotlib (Agg), seaborn, tqdm |
 | `damask` | `export_damask` |
-| `extra` | `export_exodus` (netCDF4), rarely used helpers of the legacy code |
+| `extra` | rarely used helpers of the legacy code |
 | `gui` | PyQt GUI `DRAGen.py` and the legacy generator `DRAGen_nogui.py` |
 | `test` | pytest |
 
@@ -136,7 +136,8 @@ Example (run from the repository root, it uses the trained GANs in `ExampleInput
 ```python
 from pathlib import Path
 from dragen.api import PhaseSpec, RVESpec, generate_rve
-from dragen.export import export_damask, export_vtu
+from dragen.api import BandSpec, InclusionSpec        # optional features
+from dragen.export import export_abaqus, export_damask, export_exodus, export_grains, export_vtu
 
 spec = RVESpec(
     box_size_m=5.5e-6,              # cube edge in metres (or (x, y, z))
@@ -148,9 +149,23 @@ spec = RVESpec(
 )
 rve = generate_rve(spec)
 print(rve.grain_ids.shape, rve.orientations.shape, rve.tet_mesh.cells.shape)
-export_damask(rve, Path('out/damask'))  # grid.vti + material.yaml
-export_vtu(rve, Path('out/rve'))        # rve.vtu; also export_gmsh, export_exodus
+export_damask(rve, Path('out/damask'))  # grid.vti + material.yaml (no load case)
+export_abaqus(rve, Path('out/rve'))     # rve.inp (mesh, sets, sections, PBC) + graindata.inp
+export_exodus(rve, Path('out/rve'))     # rve.e for MOOSE: block per grain, box-face sets
+export_vtu(rve, Path('out/rve'))        # rve.vtu; also export_gmsh
+export_grains(rve, Path('out/grains'))  # grains.csv, one row per grain
 ```
+
+Bands and inclusions: `RVESpec(..., bands=BandSpec(count=1, thickness_m=(3e-6, 4e-6),
+source=..., phase='martensite'), inclusions=InclusionSpec(source=..., fraction=0.01))`. The grains
+of a band are merged into one grain (`rve.band_ids` gives the band of a grain).
+
+Exports: the mesh exports (Abaqus, Exodus, VTU, MSH) take the tetrahedral mesh if there is one,
+otherwise one hexahedron per voxel (`mesh='voxel'|'tet'` chooses). The Abaqus file is model data
+without materials and steps: include it in a job file that defines one material per section
+(`Ferrite_12`, ... or per phase with `material_per='phase'`) and loads the reference nodes
+`RP_X/RP_Y/RP_Z`, whose displacement is the jump across the periodic box. Exodus side and node sets
+carry the names of MOOSE's GeneratedMesh (`left/right`, `bottom/top`, `back/front`).
 
 Conventions (details in the docstring of `dragen/api.py`):
 

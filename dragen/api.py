@@ -41,7 +41,7 @@ import pandas as pd
 from scipy.spatial.transform import Rotation
 
 from dragen.config.phases import Phase
-from dragen.config.rve import BoxConfig, PhaseConfig, RveConfig
+from dragen.config.rve import BandConfig, BoxConfig, InclusionConfig, PhaseConfig, RveConfig
 
 log = logging.getLogger(__name__)
 
@@ -85,6 +85,60 @@ class PhaseSpec:
 
 
 @dataclass(frozen=True)
+class BandSpec:
+    """Bands of one phase (e.g. martensite bands in DP steel), parallel to a box face.
+
+    count: number of bands.
+    thickness_m: (min, max) thickness in metres; each band draws its thickness uniformly.
+    source: grain data of the band grains (GAN .pkl or CSV, micrometres, as PhaseSpec.source).
+    phase: phase of the band, one of MATRIX_PHASES. Band grains take the orientation file of the
+        PhaseSpec of this phase, if there is one.
+    normal_axis: 0, 1 or 2 (x, y, z); the bands lie in the plane normal to it.
+    filling: volume fraction of each band slab taken by band grains; the rest is matrix.
+
+    The grains of a band are merged into one grain after the tessellation (one orientation per
+    band). The phase fractions of the PhaseSpecs refer to the matrix, i.e. the box without the
+    band grains.
+    """
+
+    count: int
+    thickness_m: Tuple[float, float]
+    source: Path
+    phase: str = 'martensite'
+    normal_axis: int = 2
+    filling: float = 0.5
+
+    def __post_init__(self):
+        phase = str(self.phase).lower()
+        if phase not in MATRIX_PHASES:
+            raise ValueError(f'unknown band phase {self.phase!r}, expected one of {MATRIX_PHASES}')
+        object.__setattr__(self, 'phase', phase)
+        object.__setattr__(self, 'source', Path(self.source))
+        object.__setattr__(self, 'thickness_m', tuple(float(t) for t in self.thickness_m))
+
+    def to_config(self) -> BandConfig:
+        return BandConfig(count=int(self.count), phase=self.phase, source=str(self.source),
+                          thickness=tuple(t * 1e6 for t in self.thickness_m),
+                          normal_axis=int(self.normal_axis), filling=float(self.filling))
+
+
+@dataclass(frozen=True)
+class InclusionSpec:
+    """Non-growing inclusions or pores, placed inside grains after the tessellation (phase
+    'inclusions'). fraction: volume fraction of the box; source: their size and shape data
+    (GAN .pkl or CSV, micrometres). Inclusions that fit into no grain are left out (warning)."""
+
+    source: Path
+    fraction: float
+
+    def __post_init__(self):
+        object.__setattr__(self, 'source', Path(self.source))
+
+    def to_config(self) -> InclusionConfig:
+        return InclusionConfig(source=str(self.source), fraction=float(self.fraction))
+
+
+@dataclass(frozen=True)
 class RVESpec:
     """What generate_rve builds.
 
@@ -96,6 +150,8 @@ class RVESpec:
     mesh: 'voxel' (labels only) or 'tet' (also a tetrahedral mesh with smoothed grain boundaries).
     tet_order: 1 (4-node) or 2 (10-node) tetrahedra.
     seed: random seed; the same seed and input give the same RVE.
+    bands: optional BandSpec.
+    inclusions: optional InclusionSpec.
     """
 
     box_size_m: Union[float, Tuple[float, float, float]]
@@ -105,6 +161,8 @@ class RVESpec:
     mesh: Literal['voxel', 'tet'] = 'voxel'
     tet_order: Literal[1, 2] = 2
     seed: int = 0
+    bands: Optional[BandSpec] = None
+    inclusions: Optional[InclusionSpec] = None
 
     def __post_init__(self):
         size = self.box_size_m
@@ -132,7 +190,12 @@ class RVESpec:
         size_um = tuple(s * 1e6 for s in self.box_size_m)
         box = BoxConfig(size=size_um, resolution=int(self.resolution) / size_um[0], periodic=self.periodic)
         phases = tuple(PhaseConfig(phase=p.name, source=str(p.source), fraction=p.fraction) for p in self.phases)
-        return RveConfig(box=box, phases=phases, seed=int(self.seed))
+        extra = {}
+        if self.bands is not None:
+            extra['bands'] = self.bands.to_config()
+        if self.inclusions is not None:
+            extra['inclusions'] = self.inclusions.to_config()
+        return RveConfig(box=box, phases=phases, seed=int(self.seed), **extra)
 
     def to_dict(self) -> dict:
         def plain(value):
@@ -178,7 +241,12 @@ class RVEResult:
     orientations: (G, 4) float64 unit quaternions (w, x, y, z), crystal -> sample, active.
     euler_bunge_deg: (G, 3) float64, the same orientations as Bunge Euler angles in degrees.
     phase_ids: (G,) int32 DRAGen phase ID per grain (1 ferrite, 2 martensite, 3 pearlite,
-        4 bainite, 5 austenite); `phase_names` maps them to names.
+        4 bainite, 5 austenite, 6 inclusions); `phase_names` maps them to names.
+    band_ids: (G,) int32 band index 0 ... of a grain, -1 outside bands. Band k is grain k + 1;
+        band grains without contact to their band stay grains of their own with its index.
+    radii_m: (G, 3) semi-axes a, b, c of the sampled ellipsoid in metres (for a band the sphere
+        of its summed grain volume), alpha_deg: (G,) its tilt about ND. The grain's voxels are
+        the result of the tessellation, not this ellipsoid.
     box_size_m: (x, y, z) edge lengths in metres.
     tet_mesh: only for spec.mesh == 'tet'.
     metadata: dragen version, git commit, seed, SHA-256 of the spec and the input files, run
@@ -192,8 +260,15 @@ class RVEResult:
     phase_names: Dict[int, str]
     box_size_m: Tuple[float, float, float]
     periodic: Tuple[bool, bool, bool]
+    band_ids: Optional[np.ndarray] = None
+    radii_m: Optional[np.ndarray] = None
+    alpha_deg: Optional[np.ndarray] = None
     tet_mesh: Optional[TetMesh] = None
     metadata: dict = field(default_factory=dict)
+
+    def __post_init__(self):
+        if self.band_ids is None:
+            self.band_ids = np.full(len(self.orientations), -1, dtype=np.int32)
 
     @property
     def n_grains(self) -> int:
@@ -213,6 +288,8 @@ class RVEResult:
         out_dir.mkdir(parents=True, exist_ok=True)
         arrays = dict(grain_ids=self.grain_ids, orientations=self.orientations,
                       euler_bunge_deg=self.euler_bunge_deg, phase_ids=self.phase_ids,
+                      band_ids=self.band_ids,
+                      **({} if self.radii_m is None else dict(radii_m=self.radii_m, alpha_deg=self.alpha_deg)),
                       box_size_m=np.array(self.box_size_m), periodic=np.array(self.periodic))
         if self.tet_mesh is not None:
             arrays.update(tet_points=self.tet_mesh.points, tet_cells=self.tet_mesh.cells,
@@ -268,6 +345,9 @@ def generate_rve(spec: RVESpec, out_dir: Optional[Path] = None) -> RVEResult:
         phase_names={int(p): Phase(p).name.lower() for p in Phase},
         box_size_m=spec.box_size_m,
         periodic=spec.periodic,
+        band_ids=np.asarray(grains.band, dtype=np.int32),
+        radii_m=np.asarray(grains.radii, dtype=np.float64) * 1e-6,
+        alpha_deg=np.asarray(grains.alpha, dtype=np.float64),
         tet_mesh=tet,
         metadata={
             'dragen_version': _version(),
@@ -364,6 +444,9 @@ def _spec_hash(spec: RVESpec) -> str:
         files[p.source.as_posix()] = _file_hash(p.source)
         if p.orientations is not None:
             files[p.orientations.as_posix()] = _file_hash(p.orientations)
+    for feature in (spec.bands, spec.inclusions):
+        if feature is not None:
+            files[feature.source.as_posix()] = _file_hash(feature.source)
     payload = json.dumps({'spec': spec.to_dict(), 'files': files}, sort_keys=True)
     return hashlib.sha256(payload.encode('utf-8')).hexdigest()
 

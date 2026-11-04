@@ -212,14 +212,15 @@ def test_exodus_has_one_block_per_grain(tet, tmp_path):
     with netCDF4.Dataset(path) as ds:
         assert np.array_equal(ds['eb_prop1'][:], ids)                       # block ID = grain ID
         assert list(netCDF4.chartostring(ds['eb_names'][:])) == [f'grain_{g}' for g in ids]
-    e = meshio.read(path)
-    assert [len(c.data) for c in e.cells] == list(counts)
+        assert [ds.dimensions[f'num_el_in_blk{i}'].size for i in range(1, len(ids) + 1)] == list(counts)
+    e = meshio.read(path)                    # meshio reads the blocks in file order, not by number
+    assert sorted(len(c.data) for c in e.cells) == sorted(counts)
 
 
 def test_exports_without_mesh_say_so(voxel, tmp_path):
     from dragen.export import export_vtu
     with pytest.raises(ValueError, match="mesh='tet'"):
-        export_vtu(voxel, tmp_path / 'x')
+        export_vtu(voxel, tmp_path / 'x', mesh='tet')
 
 
 def test_save(tet, tmp_path):

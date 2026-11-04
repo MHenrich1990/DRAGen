@@ -320,53 +320,66 @@ def generate_rve(spec: RVESpec, out_dir: Optional[Path] = None) -> RVEResult:
     log.info('generating RVE: %s voxels, %d phases, seed %d', config.box.shape, len(spec.phases), spec.seed)
     with _capture_warnings() as warnings:
         result = generate(config)
-        grains = result.grains
         labels = result.labels.astype(np.int32, copy=False)
-        euler = np.array(grains.euler, dtype=np.float64)
-        phase_ids = np.asarray(grains.phase, dtype=np.int32)
-        _orientations_from_files(spec, euler, phase_ids)
         seconds = dict(result.seconds)
-        metadata_mesh = {}
-        tet = None
+        euler = np.array(result.grains.euler, dtype=np.float64)
+        _orientations_from_files(spec, euler, np.asarray(result.grains.phase, dtype=np.int32))
+        tet, metadata_mesh = None, {}
         if spec.mesh == 'tet':
             t = time.perf_counter()
             tet, metadata_mesh = _tet_mesh(labels, config.box, spec.tet_order)
             seconds['tet_mesh'] = time.perf_counter() - t
     seconds['total'] = time.perf_counter() - start
 
+    out = result_from_generation(config, labels, result.grains, tet=tet, euler=euler, metadata={
+        'seed': spec.seed, 'spec': spec.to_dict(), 'spec_sha256': _spec_hash(spec),
+        'seconds': seconds, 'warnings': warnings, **metadata_mesh})
+    log.info('RVE with %d grains in %.1f s', out.n_grains, seconds['total'])
+    if out_dir is not None:
+        out.save(Path(out_dir))
+    return out
+
+
+def result_from_generation(config: RveConfig, labels: np.ndarray, grains, tet: Optional[TetMesh] = None,
+                           euler: Optional[np.ndarray] = None, metadata: Optional[dict] = None) -> RVEResult:
+    """RVEResult from the output of dragen.pipeline.generate (micrometres, GrainTable), e.g. for
+    runs made with an RveConfig (GUI, CLI). euler replaces the grains' angles if given."""
+    labels = np.asarray(labels).astype(np.int32, copy=False)
+    euler = np.array(grains.euler if euler is None else euler, dtype=np.float64)
+    phase_ids = np.asarray(grains.phase, dtype=np.int32)
     counts = np.bincount(labels.ravel(), minlength=len(grains) + 1)[1:]
     fractions = {Phase(p).name.lower(): float(counts[phase_ids == p].sum() / labels.size)
                  for p in np.unique(phase_ids)}
-    out = RVEResult(
+    radii = np.asarray(grains.radii, dtype=np.float64) * 1e-6
+    if radii.shape[1] == 2:
+        radii = np.column_stack([radii, radii[:, :1]])
+    return RVEResult(
         grain_ids=labels,
         orientations=euler_to_quaternion(euler),
         euler_bunge_deg=euler,
         phase_ids=phase_ids,
         phase_names={int(p): Phase(p).name.lower() for p in Phase},
-        box_size_m=spec.box_size_m,
-        periodic=spec.periodic,
+        box_size_m=tuple(float(s) * 1e-6 for s in config.box.size),
+        periodic=tuple(bool(p) for p in config.box.periodic),
         band_ids=np.asarray(grains.band, dtype=np.int32),
-        radii_m=np.asarray(grains.radii, dtype=np.float64) * 1e-6,
+        radii_m=radii,
         alpha_deg=np.asarray(grains.alpha, dtype=np.float64),
         tet_mesh=tet,
-        metadata={
-            'dragen_version': _version(),
-            'git_commit': _git_commit(),
-            'seed': spec.seed,
-            'spec': spec.to_dict(),
-            'spec_sha256': _spec_hash(spec),
-            'n_grains': int(len(grains)),
-            'shape': list(labels.shape),
-            'phase_fractions': fractions,
-            'seconds': seconds,
-            'warnings': warnings,
-            **metadata_mesh,
-        },
+        metadata={'dragen_version': _version(), 'git_commit': _git_commit(), 'seed': config.seed,
+                  'n_grains': int(len(grains)), 'shape': list(labels.shape),
+                  'phase_fractions': fractions, **(metadata or {})},
     )
-    log.info('RVE with %d grains in %.1f s', out.n_grains, seconds['total'])
-    if out_dir is not None:
-        out.save(Path(out_dir))
-    return out
+
+
+def tet_mesh_from_arrays(points_um: np.ndarray, cells: np.ndarray, grain: np.ndarray, box: BoxConfig) -> TetMesh:
+    """TetMesh (metres, periodic node pairs) from a mesh in micrometres (dragen.mesh output)."""
+    from dragen.mesh.tetmesh import periodic_node_pairs
+    axes = [a for a, p in enumerate(box.periodic) if p]
+    pairs = periodic_node_pairs(points_um, box.size, axes) if axes else {}
+    return TetMesh(points=np.asarray(points_um, dtype=np.float64) * 1e-6,
+                   cells=np.asarray(cells, dtype=np.int64),
+                   grain_ids=np.asarray(grain, dtype=np.int32),
+                   periodic_pairs={a: np.asarray(p, dtype=np.int64) for a, p in pairs.items()})
 
 
 def _orientations_from_files(spec: RVESpec, euler: np.ndarray, phase_ids: np.ndarray) -> None:
@@ -389,17 +402,12 @@ def _orientations_from_files(spec: RVESpec, euler: np.ndarray, phase_ids: np.nda
 
 def _tet_mesh(labels: np.ndarray, box: BoxConfig, order: int):
     from dragen.mesh.mesher import MeshConfig, mesh_rve
-    from dragen.mesh.tetmesh import TetMeshConfig, periodic_node_pairs
+    from dragen.mesh.tetmesh import TetMeshConfig
 
     result = mesh_rve(labels, box.spacing, box.periodic,
                       MeshConfig(tetmesh=TetMeshConfig(order=order, verbosity=0)))
     mesh = result.tets.mesh
-    axes = [a for a, p in enumerate(box.periodic) if p]
-    pairs = periodic_node_pairs(mesh.points, box.size, axes) if axes else {}
-    tet = TetMesh(points=np.asarray(mesh.points, dtype=np.float64) * 1e-6,
-                  cells=np.asarray(mesh.cells, dtype=np.int64),
-                  grain_ids=np.asarray(mesh.grain, dtype=np.int32),
-                  periodic_pairs={a: np.asarray(p, dtype=np.int64) for a, p in pairs.items()})
+    tet = tet_mesh_from_arrays(mesh.points, mesh.cells, mesh.grain, box)
     feedback = result.stats.get('feedback', [])
     best = feedback[result.stats.get('feedback_best_round', 0)] if feedback else {}
     meta = {'tet_mesh': {'elements': int(len(mesh.cells)), 'nodes': int(len(mesh.points)),

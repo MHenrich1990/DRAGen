@@ -273,3 +273,54 @@ def test_smoothed_surface_from_mesh_npz(tmp_path):
     assert r[:, 1].tolist() == [-1, -1, 2, 2]
     np.savez_compressed(tmp_path / 'old.npz', points=points)
     assert smoothed_surface(tmp_path / 'old.npz', (1, 1, 1)) is None
+
+
+def _wait(server, job_id, seconds=240):
+    deadline = time.time() + seconds
+    while True:
+        job = call(server, f'/api/jobs/{job_id}')[1]['job']
+        if job['status'] not in ('queued', 'running'):
+            return job
+        assert time.time() < deadline, 'job did not finish'
+        time.sleep(0.5)
+
+
+def test_export_job(server, tiny_config):
+    import zipfile
+    info = call(server, '/api/info')[1]
+    assert set(info['export_formats']) == {'damask', 'abaqus', 'exodus', 'vtu', 'gmsh', 'grains'}
+    assert not any('Export' in f['feature'] for f in info['not_supported'])
+    run = call(server, '/api/jobs', 'POST', {'name': 'to export', 'config': tiny_config})[1]['jobs'][0]['id']
+    assert _wait(server, run)['status'] == 'done'
+
+    assert call(server, f'/api/jobs/{run}/export', 'POST', {'formats': []})[0] == 400
+    assert call(server, f'/api/jobs/{run}/export', 'POST', {'formats': ['stl']})[0] == 400
+    assert call(server, f'/api/jobs/{run}/export', 'POST', {'formats': ['vtu'], 'length_unit': 'inch'})[0] == 400
+    assert call(server, f'/api/jobs/{run}/export', 'POST', {'formats': ['vtu'], 'mesh': 'nope'})[0] == 404
+
+    formats = ['abaqus', 'exodus', 'vtu', 'grains'] + ([] if 'damask' in info['export_unavailable'] else ['damask'])
+    status, res = call(server, f'/api/jobs/{run}/export', 'POST',
+                       {'formats': formats, 'mesh': 'voxel', 'length_unit': 'um', 'material_per': 'phase'})
+    assert status == 200 and res['job']['kind'] == 'export' and res['job']['parent'] == run
+    exp = res['job']['id']
+    job = _wait(server, exp)
+    assert job['status'] == 'done', '\n'.join(call(server, f'/api/jobs/{exp}/log')[1]['lines'])
+    detail = call(server, f'/api/jobs/{exp}')[1]
+    summary = detail['export']
+    assert summary['mesh'] == 'voxel' and summary['cell_type'] == 'hexahedron'
+    assert {f['format'] for f in summary['files']} == set(formats)
+    assert call(server, f'/api/jobs/{run}')[1]['exports'][0]['id'] == exp
+
+    status, raw = call(server, f'/api/jobs/{exp}/files/export.zip', raw=True)
+    assert status == 200
+    path = os.path.join(server.jobs.path(exp), 'downloaded.zip')
+    with open(path, 'wb') as f:
+        f.write(raw)
+    with zipfile.ZipFile(path) as z:
+        names = set(z.namelist())
+        assert {'abaqus/rve.inp', 'abaqus/graindata.inp', 'rve.e', 'rve.vtu', 'grains.csv', 'metadata.json'} <= names
+        inp = z.read('abaqus/rve.inp').decode()
+    labels = np.load(os.path.join(server.jobs.path(run), 'labels.npz'))['labels']
+    assert f'*Element, type=C3D8' in inp and 'material=Ferrite\n' in inp
+    assert '10, 10, 10\n' in inp or ', 10, 10, 10' in inp                  # last node at 10 um
+    assert inp.count('*Elset, elset=GRAIN_') == int(labels.max())

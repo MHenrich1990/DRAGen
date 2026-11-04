@@ -349,3 +349,106 @@ def test_vtu_of_voxel_mesh(voxel, tmp_path):
     assert out.cells[0].type == 'hexahedron'
     assert np.array_equal(out.cell_data['grain_id'][0], voxel.grain_ids.ravel())
     assert np.array_equal(out.cell_data['band_id'][0], voxel.band_ids[voxel.grain_ids.ravel() - 1])
+
+
+# ---------------------------------------------------------------------- 2D
+
+@pytest.fixture(scope='module')
+def rve2d(sources):
+    return generate_rve(RVESpec(box_size_m=(10e-6, 8e-6), resolution=20, seed=3,
+                                phases=[PhaseSpec('ferrite', 1.0, sources[0])], periodic=(True, False),
+                                bands=BandSpec(1, (2e-6, 2.5e-6), sources[0])))
+
+
+@pytest.fixture(scope='module')
+def tri2d(sources):
+    return generate_rve(RVESpec(box_size_m=(10e-6, 8e-6), resolution=20, seed=3, mesh='tet',
+                                phases=[PhaseSpec('ferrite', 1.0, sources[0])], periodic=(True, True)))
+
+
+def test_2d_result(rve2d, tri2d):
+    assert rve2d.grain_ids.shape == (20, 16) and rve2d.periodic == (True, False)
+    assert rve2d.band_ids[0] == 0                                            # band normal to y
+    rows = (rve2d.grain_ids == 1).any(axis=0)                                # y layers of the band
+    assert 0 < rows.sum() < 12 and (rve2d.grain_ids == 1).any(axis=1).mean() > 0.8   # along x
+    t = tri2d.tet_mesh
+    assert t.cell_type == 'triangle6' and t.points.shape[1] == 2 and set(t.periodic_pairs) == {0, 1}
+    assert tri2d.metadata['tri_mesh']['inverted'] == 0
+
+
+EXODUS_EDGES = {'QUAD4': [(1, 2), (2, 3), (3, 4), (4, 1)], 'TRI3': [(1, 2), (2, 3), (3, 1)],
+                'TRI6': [(1, 2), (2, 3), (3, 1)]}
+
+
+@pytest.mark.parametrize('kind', ['pixel', 'tri'])
+def test_2d_exodus(rve2d, tri2d, kind, tmp_path):
+    """Exodus standard edge numbering written out here: every side lies on its box side with the
+    element inside the box, and the sides cover the box side."""
+    netCDF4 = pytest.importorskip('netCDF4')
+    r = rve2d if kind == 'pixel' else tri2d
+    path = export_exodus(r, tmp_path / 'rve')
+    with netCDF4.Dataset(path) as ds:
+        assert ds.dimensions['num_dim'].size == 2
+        pts = np.column_stack([ds['coordx'][:], ds['coordy'][:]])
+        n_blocks = ds.dimensions['num_el_blk'].size
+        conn = np.concatenate([np.asarray(ds[f'connect{i}'][:]) - 1 for i in range(1, n_blocks + 1)])
+        etype = ds['connect1'].elem_type
+        names = list(netCDF4.chartostring(ds['ss_names'][:]))
+        assert names == ['left', 'right', 'bottom', 'top']
+        L = np.array(r.box_size_m)
+        for i, (axis, side) in enumerate([(0, 0), (0, 1), (1, 0), (1, 1)], start=1):
+            elems = np.asarray(ds[f'elem_ss{i}'][:]) - 1
+            sides = np.asarray(ds[f'side_ss{i}'][:]) - 1
+            edge = np.array([EXODUS_EDGES[etype][s] for s in sides]) - 1
+            nodes = conn[elems[:, None], edge]
+            target = side * L[axis]
+            assert np.allclose(pts[nodes, axis], target, atol=1e-12)
+            # element interior (centroid of its corners) on the inner side of the box side
+            n_corner = 4 if etype == 'QUAD4' else 3
+            centroid = pts[conn[elems, :n_corner]].mean(axis=1)[:, axis]
+            assert np.all((centroid > target) if side == 0 else (centroid < target))
+            length = np.abs(pts[nodes[:, 1], 1 - axis] - pts[nodes[:, 0], 1 - axis]).sum()
+            assert np.isclose(length, L[1 - axis])
+
+
+@pytest.mark.parametrize('kind', ['pixel', 'tri'])
+def test_2d_abaqus(rve2d, tri2d, kind, tmp_path):
+    r = rve2d if kind == 'pixel' else tri2d
+    m = solver_mesh(r)
+    inp = read_inp(export_abaqus(r, tmp_path / 'rve', length_unit='um')['inp'])
+    assert inp['etype'] == {'quad': 'CPE4', 'triangle6': 'CPE6'}[m.cell_type]
+    pts = np.array([inp['nodes'][k] for k in range(1, len(m.points) + 1)])
+    assert pts.shape[1] == 2 and np.allclose(pts, m.points * 1e6)
+    assert {'LEFT', 'RIGHT', 'BOTTOM', 'TOP'} <= set(inp['nsets']) and 'BACK' not in inp['nsets']
+    L = np.array(r.box_size_m) * 1e6
+    rp_axis = {'RP_X': 0, 'RP_Y': 1}
+    for eq in inp['equations']:
+        (s, dof, _), (mst, _, _), *rps = eq
+        assert dof in (1, 2)
+        shift = np.zeros(2)
+        for name, _, _ in rps:
+            shift[rp_axis[name]] += L[rp_axis[name]]
+        assert np.allclose(pts[int(s.split('.')[1]) - 1], pts[int(mst.split('.')[1]) - 1] + shift, atol=1e-6)
+    upper = np.zeros(len(m.points), bool)
+    for a in m.periodic_pairs:
+        upper |= m.on_face(a, 1)
+    assert len(inp['equations']) == 2 * upper.sum()
+    text = (tmp_path / 'rve.inp').read_text()
+    thickness = text.split('*Solid Section')[1].splitlines()[1]
+    assert float(thickness.rstrip(',')) == pytest.approx(r.voxel_size_m[0] * 1e6)
+
+
+def test_2d_damask_and_grains(rve2d, tmp_path):
+    damask = pytest.importorskip('damask')
+    grid = damask.GeomGrid.load(export_damask(rve2d, tmp_path / 'd')['grid'])
+    assert grid.cells.tolist() == [20, 16, 1] and np.array_equal(grid.material[:, :, 0] + 1, rve2d.grain_ids)
+    assert np.allclose(grid.size, [10e-6, 8e-6, 0.5e-6])
+    table = grain_table(rve2d)
+    assert 'area_m2' in table and np.isclose(table.area_m2.sum(), 80e-12)
+    assert np.allclose(table.eq_diameter_m, 2 * np.sqrt(table.area_m2 / np.pi))
+
+
+def test_2d_vtu(tri2d, tmp_path):
+    import meshio
+    out = meshio.read(export_vtu(tri2d, tmp_path / 'rve'))
+    assert out.cells[0].type == 'triangle6' and np.allclose(out.points[:, :2], tri2d.tet_mesh.points)

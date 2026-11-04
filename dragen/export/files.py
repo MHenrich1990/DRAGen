@@ -5,9 +5,10 @@ from pathlib import Path
 
 import numpy as np
 
-from dragen.export.mesh import BOX_FACES, EXODUS_SIDES, MeshKind, SolverMesh, solver_mesh
+from dragen.export.mesh import EXODUS_SIDES, MeshKind, SolverMesh, box_faces, solver_mesh
 
-_EXODUS_TYPE = {'hexahedron': 'HEX8', 'tetra': 'TETRA4', 'tetra10': 'TETRA10'}
+_EXODUS_TYPE = {'hexahedron': 'HEX8', 'tetra': 'TETRA4', 'tetra10': 'TETRA10',
+                'quad': 'QUAD4', 'triangle': 'TRI3', 'triangle6': 'TRI6'}
 
 
 def _cell_data(result, m: SolverMesh):
@@ -26,7 +27,7 @@ def export_vtu(result, path: Path, mesh: MeshKind = 'auto') -> Path:
     path = Path(path).with_suffix('.vtu')
     path.parent.mkdir(parents=True, exist_ok=True)
     data = {k: [v] for k, v in _cell_data(result, m).items()}
-    meshio.Mesh(m.points, [(m.cell_type, m.cells)], cell_data=data).write(path)
+    meshio.Mesh(_xyz(m.points), [(m.cell_type, m.cells)], cell_data=data).write(path)
     return path
 
 
@@ -38,7 +39,7 @@ def export_gmsh(result, path: Path, mesh: MeshKind = 'auto') -> Path:
     path = Path(path).with_suffix('.msh')
     path.parent.mkdir(parents=True, exist_ok=True)
     grains = m.grain_ids.astype(np.int32)
-    out = meshio.Mesh(m.points, [(m.cell_type, m.cells)],
+    out = meshio.Mesh(_xyz(m.points), [(m.cell_type, m.cells)],
                       cell_data={'gmsh:physical': [grains], 'gmsh:geometrical': [grains]})
     meshio.write(path, out, file_format='gmsh22', binary=False)
     return path
@@ -50,7 +51,8 @@ def export_exodus(result, path: Path, mesh: MeshKind = 'auto') -> Path:
     Element blocks: one per grain, block ID = grain ID (MOOSE subdomain ID), name grain_<ID>;
     elements numbered block by block. Node sets and side sets: the six box faces with the names
     of MOOSE's GeneratedMesh, IDs 0-5 as there: left/right (x = 0 / x = L), bottom/top (y),
-    back/front (z); node sets include the midside nodes. MOOSE's periodic boundaries pair these
+    back/front (z); node sets include the midside nodes. 2D: QUAD4/TRI3/TRI6, two coordinates,
+    the four sides left/right/bottom/top (IDs 0-3). MOOSE's periodic boundaries pair these
     side sets (e.g. left - right). Written directly (netCDF classic 64-bit offset format, 32-bit
     integers) with scipy's netCDF writer: meshio drops block IDs, names and sets, and netCDF4
     defines variables in quadratic time in the number of dimensions (two per block: 30 s for
@@ -72,7 +74,7 @@ def export_exodus(result, path: Path, mesh: MeshKind = 'auto') -> Path:
     side_sets = m.face_sides(EXODUS_SIDES[m.cell_type])
 
     dims = [('time_step', None), ('len_string', 33), ('len_line', 81), ('four', 4), ('len_name', 33),
-            ('num_dim', 3), ('num_nodes', len(m.points)), ('num_elem', len(m.cells)),
+            ('num_dim', m.ndim), ('num_nodes', len(m.points)), ('num_elem', len(m.cells)),
             ('num_el_blk', len(ids)), ('num_node_sets', len(node_sets)), ('num_side_sets', len(side_sets))]
     variables = []                                   # (name, type, dims, attributes, data)
 
@@ -85,8 +87,8 @@ def export_exodus(result, path: Path, mesh: MeshKind = 'auto') -> Path:
         variables.append((f'{prefix}_prop1', 'i4', (dim,), {'name': 'ID'}, np.asarray(values, np.int32)))
 
     variables.append(('time_whole', 'f8', ('time_step',), {}, None))
-    names('coor_names', 'num_dim', ['x', 'y', 'z'])
-    for axis, var in enumerate(['coordx', 'coordy', 'coordz']):
+    names('coor_names', 'num_dim', ['x', 'y', 'z'][:m.ndim])
+    for axis, var in enumerate(['coordx', 'coordy', 'coordz'][:m.ndim]):
         variables.append((var, 'f8', ('num_nodes',), {}, m.points[:, axis]))
     id_props('eb', 'num_el_blk', ids)
     names('eb_names', 'num_el_blk', [f'grain_{g}' for g in ids])
@@ -94,9 +96,10 @@ def export_exodus(result, path: Path, mesh: MeshKind = 'auto') -> Path:
         dims += [(f'num_el_in_blk{i}', len(block)), (f'num_nod_per_el{i}', m.cells.shape[1])]
         variables.append((f'connect{i}', 'i4', (f'num_el_in_blk{i}', f'num_nod_per_el{i}'),
                           {'elem_type': _EXODUS_TYPE[m.cell_type]}, (m.cells[block] + 1).astype(np.int32)))
-    set_names = [name for name, _, _ in BOX_FACES]
+    faces = box_faces(m.ndim)
+    set_names = [name for name, _, _ in faces]
     for prefix, count in (('ns', 'num_node_sets'), ('ss', 'num_side_sets')):
-        id_props(prefix, count, np.arange(len(BOX_FACES)))
+        id_props(prefix, count, np.arange(len(faces)))
         names(f'{prefix}_names', count, set_names)
     for i, name in enumerate(set_names, start=1):
         nodes = node_sets[name]
@@ -123,3 +126,8 @@ def export_exodus(result, path: Path, mesh: MeshKind = 'auto') -> Path:
             if data is not None:
                 v[:] = data
     return path
+
+
+def _xyz(points: np.ndarray) -> np.ndarray:
+    """2D points with z = 0 (VTU and MSH store three coordinates)."""
+    return points if points.shape[1] == 3 else np.column_stack([points, np.zeros(len(points))])

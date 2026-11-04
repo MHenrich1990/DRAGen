@@ -95,3 +95,15 @@ def test_substructure_from_the_configuration(config_file, tmp_path):
     assert np.array_equal(blocks.parent_grain_ids[blocks.grain_ids - 1], rve.grain_ids)
     table = pd.read_csv(tmp_path / 'o' / 'rve_000' / 'grains.csv')            # exported: the blocks
     assert len(table) == blocks.n_grains and 'packet_id' in table
+
+
+def test_2d_rve_with_triangles(config_file, tmp_path):
+    data = yaml.safe_load(config_file.read_text())
+    data['box'] = {'size': [10.0, 8.0], 'resolution': 2.0, 'periodic': [True, True]}
+    data['mesh'] = {'kind': 'tet', 'order': 2}
+    path = tmp_path / 'c2d.yaml'
+    path.write_text(yaml.safe_dump(data))
+    assert main(['-q', 'generate', str(path), '-o', str(tmp_path / 'o'), '-f', 'abaqus,exodus,grains']) == 0
+    r = RVEResult.load(tmp_path / 'o' / 'rve_000')
+    assert r.grain_ids.shape == (20, 16) and r.tet_mesh.cell_type == 'triangle6'
+    assert '*Element, type=CPE6' in (tmp_path / 'o' / 'rve_000' / 'abaqus' / 'rve.inp').read_text()

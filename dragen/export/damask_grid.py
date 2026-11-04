@@ -13,6 +13,7 @@ def export_damask(result, path: Path) -> Dict[str, Path]:
     """Write <path>/grid.vti and <path>/material.yaml; returns both paths.
 
     grid.vti: material index g - 1 for grain g (DAMASK counts from 0), size in metres, origin 0.
+    2D: one layer of cells, as thick as a pixel is wide.
     material.yaml: one material per grain in grain order, with its orientation (the quaternion of
     the RVEResult, which DAMASK reads as the same rotation, see dragen.api), its phase (Ferrite,
     Martensite, ...) and homogenization 'SX'. The phase and homogenization entries are left
@@ -23,8 +24,12 @@ def export_damask(result, path: Path) -> Dict[str, Path]:
     path = Path(path)
     path.mkdir(parents=True, exist_ok=True)
 
-    grid = damask.GeomGrid(material=np.asarray(result.grain_ids, dtype=np.int64) - 1,
-                           size=np.asarray(result.box_size_m, dtype=float),
+    material = np.asarray(result.grain_ids, dtype=np.int64) - 1
+    size = np.asarray(result.box_size_m, dtype=float)
+    if material.ndim == 2:                       # 2D: one layer of cubic cells
+        material = material[:, :, None]
+        size = np.append(size, result.voxel_size_m[0])
+    grid = damask.GeomGrid(material=material, size=size,
                            comments=[f'DRAGen {result.metadata.get("dragen_version")}, '
                                      f'seed {result.metadata.get("seed")}, '
                                      f'spec {result.metadata.get("spec_sha256")}'])

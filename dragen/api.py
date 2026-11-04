@@ -93,7 +93,8 @@ class BandSpec:
     source: grain data of the band grains (GAN .pkl or CSV, micrometres, as PhaseSpec.source).
     phase: phase of the band, one of MATRIX_PHASES. Band grains take the orientation file of the
         PhaseSpec of this phase, if there is one.
-    normal_axis: 0, 1 or 2 (x, y, z); the bands lie in the plane normal to it.
+    normal_axis: 0, 1 or 2 (x, y, z); the bands lie in the plane normal to it. Default: the last
+        axis (z, in 2D y).
     filling: volume fraction of each band slab taken by band grains; the rest is matrix.
 
     The grains of a band are merged into one grain after the tessellation (one orientation per
@@ -105,7 +106,7 @@ class BandSpec:
     thickness_m: Tuple[float, float]
     source: Path
     phase: str = 'martensite'
-    normal_axis: int = 2
+    normal_axis: Optional[int] = None
     filling: float = 0.5
 
     def __post_init__(self):
@@ -119,7 +120,8 @@ class BandSpec:
     def to_config(self) -> BandConfig:
         return BandConfig(count=int(self.count), phase=self.phase, source=str(self.source),
                           thickness=tuple(t * 1e6 for t in self.thickness_m),
-                          normal_axis=int(self.normal_axis), filling=float(self.filling))
+                          normal_axis=-1 if self.normal_axis is None else int(self.normal_axis),
+                          filling=float(self.filling))
 
 
 @dataclass(frozen=True)
@@ -142,13 +144,15 @@ class InclusionSpec:
 class RVESpec:
     """What generate_rve builds.
 
-    box_size_m: edge length of a cube, or (x, y, z) edge lengths, in metres.
+    box_size_m: edge length of a cube, or (x, y, z) edge lengths, in metres; (x, y) for a 2D RVE
+        (pixels, triangles; grain_ids (nx, ny)).
     resolution: voxels along x; voxels are cubes, so y and z get size / voxel size (rounded).
         The tetrahedral mesh is built on these voxels.
     phases: the phases with their sources and fractions.
     periodic: all axes, or per axis (x, y, z). A non-periodic axis is a free surface.
-    mesh: 'voxel' (labels only) or 'tet' (also a tetrahedral mesh with smoothed grain boundaries).
-    tet_order: 1 (4-node) or 2 (10-node) tetrahedra.
+    mesh: 'voxel' (labels only) or 'tet' (also a tetrahedral mesh with smoothed grain boundaries;
+        2D: triangles).
+    tet_order: 1 (4-node) or 2 (10-node) tetrahedra (2D: 3- or 6-node triangles).
     seed: random seed; the same seed and input give the same RVE.
     bands: optional BandSpec.
     inclusions: optional InclusionSpec.
@@ -167,11 +171,13 @@ class RVESpec:
     def __post_init__(self):
         size = self.box_size_m
         size = (float(size),) * 3 if np.isscalar(size) else tuple(float(s) for s in size)
-        if len(size) != 3:
-            raise ValueError(f'box_size_m needs 1 or 3 entries, got {len(size)}')
+        if len(size) not in (2, 3):
+            raise ValueError(f'box_size_m needs 1, 2 (2D) or 3 entries, got {len(size)}')
         object.__setattr__(self, 'box_size_m', size)
         periodic = self.periodic
-        periodic = (bool(periodic),) * 3 if isinstance(periodic, (bool, np.bool_)) else tuple(bool(p) for p in periodic)
+        periodic = (bool(periodic),) * len(size) if isinstance(periodic, (bool, np.bool_)) else tuple(bool(p) for p in periodic)
+        if len(periodic) != len(size):
+            raise ValueError(f'periodic needs {len(size)} entries, got {len(periodic)}')
         object.__setattr__(self, 'periodic', periodic)
         object.__setattr__(self, 'phases', tuple(self.phases))
         if int(self.resolution) < 2:
@@ -192,7 +198,11 @@ class RVESpec:
         phases = tuple(PhaseConfig(phase=p.name, source=str(p.source), fraction=p.fraction) for p in self.phases)
         extra = {}
         if self.bands is not None:
-            extra['bands'] = self.bands.to_config()
+            band = self.bands.to_config()
+            if band.normal_axis < 0:
+                from dataclasses import replace
+                band = replace(band, normal_axis=len(self.box_size_m) - 1)
+            extra['bands'] = band
         if self.inclusions is not None:
             extra['inclusions'] = self.inclusions.to_config()
         return RveConfig(box=box, phases=phases, seed=int(self.seed), **extra)
@@ -215,7 +225,8 @@ class RVESpec:
 class TetMesh:
     """Tetrahedral mesh with smoothed grain boundaries.
 
-    points: (P, 3) float64, metres, box from 0 to box_size_m.
+    points: (P, 3) float64, metres, box from 0 to box_size_m. 2D: (P, 2) and triangles
+        ('triangle', 'triangle6': corners 0-2 counter-clockwise, midside 3 (0-1), 4 (1-2), 5 (2-0)).
     cells: (E, 4) or (E, 10) int64, node order of VTK/Abaqus/meshio ('tetra', 'tetra10'):
         corners 0-3, midside nodes 4 (0-1), 5 (1-2), 6 (0-2), 7 (0-3), 8 (1-3), 9 (2-3).
     grain_ids: (E,) int32, grain of every element (same IDs as RVEResult.grain_ids).
@@ -230,7 +241,7 @@ class TetMesh:
 
     @property
     def cell_type(self) -> str:
-        return 'tetra10' if self.cells.shape[1] == 10 else 'tetra'
+        return {10: 'tetra10', 4: 'tetra', 6: 'triangle6', 3: 'triangle'}[self.cells.shape[1]]
 
 
 @dataclass
@@ -431,6 +442,8 @@ def _orientations_from_files(spec: RVESpec, euler: np.ndarray, phase_ids: np.nda
 
 
 def _tet_mesh(labels: np.ndarray, box: BoxConfig, order: int):
+    if labels.ndim == 2:
+        return _tri_mesh(labels, box, order)
     from dragen.mesh.mesher import MeshConfig, mesh_rve
     from dragen.mesh.tetmesh import TetMeshConfig
 
@@ -445,6 +458,14 @@ def _tet_mesh(labels: np.ndarray, box: BoxConfig, order: int):
                          'below_min_dihedral': best.get('below_min_dihedral'),
                          'cleanup_changed_voxels': result.stats.get('cleanup', {}).get('changed_voxels')}}
     return tet, meta
+
+
+def _tri_mesh(labels: np.ndarray, box: BoxConfig, order: int):
+    from dragen.mesh.mesh2d import Mesh2DConfig, mesh_rve_2d
+
+    result = mesh_rve_2d(labels, box.spacing, box.periodic, Mesh2DConfig(order=order))
+    tet = tet_mesh_from_arrays(result.points, result.cells, result.grain, box)
+    return tet, {'tri_mesh': {k: v for k, v in result.stats.items() if not isinstance(v, (list, dict))}}
 
 
 class _capture_warnings:

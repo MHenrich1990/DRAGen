@@ -9,8 +9,8 @@ import pandas as pd
 def grain_table(result) -> pd.DataFrame:
     """One row per grain, all phases, bands and inclusions, in grain order (row g - 1 = grain g).
 
-    grain_id, phase_id, phase, band_id (-1 outside bands), voxels, volume_m3 (voxel volume),
-    eq_diameter_m (diameter of the sphere with that volume), a_m, b_m, c_m, alpha_deg (sampled
+    grain_id, phase_id, phase, band_id (-1 outside bands), voxels, volume_m3 (voxel volume; 2D:
+    area_m2), eq_diameter_m (diameter of the sphere, 2D: circle, with that volume), a_m, b_m, c_m, alpha_deg (sampled
     ellipsoid, if the result has it), parent_grain_id and packet_id (after a substructure; the
     rows are then blocks and grains without substructure), phi1, PHI, phi2 (Bunge, degrees), qw, qx, qy, qz
     (quaternion crystal -> sample, see dragen.api).
@@ -18,14 +18,15 @@ def grain_table(result) -> pd.DataFrame:
     n = result.n_grains
     voxels = np.bincount(np.asarray(result.grain_ids).ravel(), minlength=n + 1)[1:]
     volume = voxels * float(np.prod(result.voxel_size_m))
+    two_d = np.asarray(result.grain_ids).ndim == 2
     table = {
         'grain_id': np.arange(1, n + 1),
         'phase_id': result.phase_ids,
         'phase': [result.phase_names[int(p)] for p in result.phase_ids],
         'band_id': result.band_ids,
         'voxels': voxels,
-        'volume_m3': volume,
-        'eq_diameter_m': np.cbrt(6 * volume / np.pi),
+        ('area_m2' if two_d else 'volume_m3'): volume,
+        'eq_diameter_m': 2 * np.sqrt(volume / np.pi) if two_d else np.cbrt(6 * volume / np.pi),
     }
     if result.radii_m is not None:
         table.update(a_m=result.radii_m[:, 0], b_m=result.radii_m[:, 1], c_m=result.radii_m[:, 2],

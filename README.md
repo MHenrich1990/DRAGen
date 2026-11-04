@@ -116,6 +116,14 @@ export_vtu(rve, Path('out/rve'))        # rve.vtu; also export_gmsh
 export_grains(rve, Path('out/grains'))  # grains.csv, one row per grain
 ```
 
+2D: `RVESpec(box_size_m=(x, y), ...)` gives a pixel RVE (`grain_ids` of shape (nx, ny)); with
+`mesh='tet'` it gets a triangle mesh (3 or 6 nodes) with smoothed grain boundaries, and the
+exports write plane elements (Abaqus CPE4/CPE3/CPE6, Exodus QUAD4/TRI3/TRI6, DAMASK one cell layer).
+
+Martensite substructure: `from dragen.substructure import SubstructureConfig, generate_substructure,
+apply_substructure`; `apply_substructure(rve, generate_substructure(rve, SubstructureConfig(
+block_thickness=1.0)))` returns an RVE with one region per block (3D).
+
 Bands and inclusions: `RVESpec(..., bands=BandSpec(count=1, thickness_m=(3e-6, 4e-6),
 source=..., phase='martensite'), inclusions=InclusionSpec(source=..., fraction=0.01))`. The grains
 of a band are merged into one grain (`rve.band_ids` gives the band of a grain).

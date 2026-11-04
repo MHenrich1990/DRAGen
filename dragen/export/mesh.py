@@ -1,12 +1,16 @@
-"""The finite element mesh every solver export writes: the tetrahedral mesh of an RVEResult or a
-voxel mesh (one 8-node hexahedron per voxel), with what the solver files need on top of the
-elements: nodes and element faces on the six box faces, and the periodic node classes.
+"""The finite element mesh every solver export writes: the tetrahedral (2D: triangular) mesh of an
+RVEResult or a voxel mesh (one 8-node hexahedron per voxel; 2D: one 4-node quadrilateral per
+pixel), with what the solver files need on top of the elements: nodes and element faces (2D:
+edges) on the box faces, and the periodic node classes.
 
 Node order of the cells is the one of VTK, meshio, Abaqus and Exodus II (they agree for these
-three types):
+types):
     hexahedron  bottom face (z low) 0-1-2-3 counter-clockwise seen from +z, then 4-7 above them
     tetra       0-3, positive volume
     tetra10     corners 0-3, midside nodes 4 (0-1), 5 (1-2), 6 (0-2), 7 (0-3), 8 (1-3), 9 (2-3)
+    quad        0-1-2-3 counter-clockwise
+    triangle    0-2 counter-clockwise
+    triangle6   corners 0-2, midside nodes 3 (0-1), 4 (1-2), 5 (2-0)
 """
 from dataclasses import dataclass
 from typing import Dict, Literal, Tuple
@@ -20,7 +24,11 @@ MeshKind = Literal['auto', 'voxel', 'tet']
 BOX_FACES: Tuple[Tuple[str, int, int], ...] = (
     ('left', 0, 0), ('right', 0, 1), ('bottom', 1, 0), ('top', 1, 1), ('back', 2, 0), ('front', 2, 1))
 """(name, axis, side) of the box faces; side 0 is the face at 0, side 1 the face at the box size.
-The names are those of MOOSE's GeneratedMesh and of the legacy MOOSE export."""
+The names are those of MOOSE's GeneratedMesh and of the legacy MOOSE export. 2D: the first four."""
+
+
+def box_faces(ndim: int) -> Tuple[Tuple[str, int, int], ...]:
+    return BOX_FACES[:2 * ndim]
 
 # Local faces (corner nodes, 0-based, pointing out of the element) in the side numbering of
 # Exodus II; Abaqus numbers the faces of C3D8 and C3D4/C3D10 differently (see abaqus.py).
@@ -29,28 +37,37 @@ EXODUS_SIDES = {
     'tetra': ((0, 1, 3), (1, 2, 3), (0, 3, 2), (0, 2, 1)),
 }
 EXODUS_SIDES['tetra10'] = EXODUS_SIDES['tetra']
+EXODUS_SIDES['quad'] = ((0, 1), (1, 2), (2, 3), (3, 0))
+EXODUS_SIDES['triangle'] = ((0, 1), (1, 2), (2, 0))
+EXODUS_SIDES['triangle6'] = EXODUS_SIDES['triangle']
+CORNERS = {'tetra10': 4, 'triangle6': 3}
 
 _HEX_CORNERS = np.array([(0, 0, 0), (1, 0, 0), (1, 1, 0), (0, 1, 0),
                          (0, 0, 1), (1, 0, 1), (1, 1, 1), (0, 1, 1)])
+_QUAD_CORNERS = np.array([(0, 0), (1, 0), (1, 1), (0, 1)])
 
 
 @dataclass
 class SolverMesh:
-    """points (P, 3) metres; cells (E, k) int64; grain_ids (E,) int32 (1 ... G); periodic_pairs
-    per periodic axis (n, 2) node indices (node on the face at 0, partner on the opposite face);
-    box_size_m (x, y, z)."""
+    """points (P, d) metres (d = 2 or 3); cells (E, k) int64; grain_ids (E,) int32 (1 ... G);
+    periodic_pairs per periodic axis (n, 2) node indices (node on the face at 0, partner on the
+    opposite face); box_size_m (x, y[, z])."""
 
     points: np.ndarray
     cells: np.ndarray
     cell_type: str
     grain_ids: np.ndarray
     periodic_pairs: Dict[int, np.ndarray]
-    box_size_m: Tuple[float, float, float]
+    box_size_m: Tuple[float, ...]
+
+    @property
+    def ndim(self) -> int:
+        return len(self.box_size_m)
 
     @property
     def corners(self) -> np.ndarray:
         """Corner nodes of every cell (midside nodes dropped)."""
-        return self.cells[:, :4] if self.cell_type == 'tetra10' else self.cells
+        return self.cells[:, :CORNERS.get(self.cell_type, self.cells.shape[1])]
 
     def on_face(self, axis: int, side: int, tol: float = 1e-9) -> np.ndarray:
         """Boolean per node: lies on the box face (axis, side); tol relative to the box size."""
@@ -59,13 +76,13 @@ class SolverMesh:
 
     def face_nodes(self) -> Dict[str, np.ndarray]:
         """Sorted node indices on each box face (BOX_FACES names), corner and midside nodes."""
-        return {name: np.flatnonzero(self.on_face(axis, side)) for name, axis, side in BOX_FACES}
+        return {name: np.flatnonzero(self.on_face(axis, side)) for name, axis, side in box_faces(self.ndim)}
 
     def face_sides(self, local_faces) -> Dict[str, Tuple[np.ndarray, np.ndarray]]:
         """Per box face the element faces lying in it: (element index, local face index, 0-based
         in `local_faces`). A face lies in the box face when all its corner nodes do."""
         out = {}
-        for name, axis, side in BOX_FACES:
+        for name, axis, side in box_faces(self.ndim):
             on = self.on_face(axis, side)
             elems, faces = [], []
             for f, nodes in enumerate(local_faces):
@@ -105,27 +122,30 @@ class SolverMesh:
 
 
 def voxel_mesh(result) -> SolverMesh:
-    """One 8-node hexahedron per voxel, in the order of result.grain_ids.ravel() (C order,
-    x slowest); node (i, j, k) of the (nx+1, ny+1, nz+1) grid has index (i*(ny+1) + j)*(nz+1) + k.
-    Periodic pairs as for the tetrahedral mesh: every node of the face at 0 with its partner."""
+    """One 8-node hexahedron per voxel (2D: 4-node quadrilateral per pixel), in the order of
+    result.grain_ids.ravel() (C order, x slowest); node (i, j, k) of the (nx+1, ny+1, nz+1) grid
+    has index (i*(ny+1) + j)*(nz+1) + k. Periodic pairs as for the tetrahedral mesh: every node of
+    the face at 0 with its partner."""
     labels = np.asarray(result.grain_ids)
+    ndim = labels.ndim
     shape = np.array(labels.shape)
     nodes_shape = tuple(shape + 1)
     spacing = np.asarray(result.box_size_m, dtype=float) / shape
-    ijk = np.indices(nodes_shape).reshape(3, -1).T
+    ijk = np.indices(nodes_shape).reshape(ndim, -1).T
     points = ijk * spacing
     points[:, :] = np.where(ijk == shape, np.asarray(result.box_size_m), points)   # exact upper faces
-    base = np.indices(tuple(shape)).reshape(3, -1).T
-    corner_ijk = base[:, None, :] + _HEX_CORNERS[None, :, :]
+    base = np.indices(tuple(shape)).reshape(ndim, -1).T
+    offsets = _HEX_CORNERS if ndim == 3 else _QUAD_CORNERS
+    corner_ijk = base[:, None, :] + offsets[None, :, :]
     cells = np.ravel_multi_index(tuple(corner_ijk.transpose(2, 0, 1)), nodes_shape).astype(np.int64)
     index = np.arange(np.prod(nodes_shape), dtype=np.int64).reshape(nodes_shape)
     pairs = {}
-    for axis in range(3):
+    for axis in range(ndim):
         if result.periodic[axis]:
             lo = np.take(index, 0, axis=axis).ravel()
             hi = np.take(index, shape[axis], axis=axis).ravel()
             pairs[axis] = np.column_stack([lo, hi])
-    return SolverMesh(points=points, cells=cells, cell_type='hexahedron',
+    return SolverMesh(points=points, cells=cells, cell_type='hexahedron' if ndim == 3 else 'quad',
                       grain_ids=labels.ravel().astype(np.int32), periodic_pairs=pairs,
                       box_size_m=tuple(float(s) for s in result.box_size_m))
 

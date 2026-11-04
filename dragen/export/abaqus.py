@@ -11,11 +11,14 @@ from typing import Dict, Literal, Optional
 
 import numpy as np
 
-from dragen.export.mesh import BOX_FACES, MeshKind, solver_mesh
+from dragen.export.mesh import MeshKind, solver_mesh
 
-_ELEMENT = {'hexahedron': 'C3D8', 'tetra': 'C3D4', 'tetra10': 'C3D10'}
+_ELEMENT = {'hexahedron': 'C3D8', 'tetra': 'C3D4', 'tetra10': 'C3D10',
+            'quad': 'CPE4', 'triangle': 'CPE3', 'triangle6': 'CPE6'}
 _NODES = {'C3D8': 8, 'C3D8R': 8, 'C3D8H': 8, 'C3D8RH': 8, 'C3D4': 4, 'C3D4H': 4,
-          'C3D10': 10, 'C3D10M': 10, 'C3D10H': 10, 'C3D10HS': 10}
+          'C3D10': 10, 'C3D10M': 10, 'C3D10H': 10, 'C3D10HS': 10,
+          'CPE4': 4, 'CPE4R': 4, 'CPS4': 4, 'CPS4R': 4, 'CPE3': 3, 'CPS3': 3, 'CPE6': 6, 'CPS6': 6,
+          'CPE6M': 6, 'CPS6M': 6}
 UNITS = {'m': 1.0, 'mm': 1e3, 'um': 1e6}
 INSTANCE = 'RVE-1'
 
@@ -29,7 +32,8 @@ def material_name(result, grain: int, material_per: str = 'grain') -> str:
 
 def export_abaqus(result, path: Path, mesh: MeshKind = 'auto', length_unit: str = 'm',
                   element_type: Optional[str] = None,
-                  material_per: Literal['grain', 'phase'] = 'grain') -> Dict[str, Path]:
+                  material_per: Literal['grain', 'phase'] = 'grain',
+                  thickness: Optional[float] = None) -> Dict[str, Path]:
     """Write <path>.inp and graindata.inp next to it; returns both paths.
 
     <path>.inp
@@ -45,6 +49,9 @@ def export_abaqus(result, path: Path, mesh: MeshKind = 'auto', length_unit: str 
         class master, u_s - u_m - sum_a k_a u(RP_a) = 0, so no constraint is redundant. Node set
         ORIGIN is the master at the box origin (fix it against rigid body motion).
         Coordinates in `length_unit` ('m', 'mm' or 'um').
+        2D: plane strain elements CPE4 (pixels), CPE3/CPE6 (triangles), or CPS* via
+        element_type; sections with thickness `thickness` (default: one pixel edge); node sets
+        LEFT/RIGHT/BOTTOM/TOP; equations for DOF 1 and 2.
     graindata.inp
         Legacy format of the UMAT input: '!MMM Crystal Plasticity Input File', then per grain
         'Grain: <g>: <phi1>: <PHI>: <phi2>: <size>' with Bunge angles in degrees and size = radius
@@ -60,6 +67,8 @@ def export_abaqus(result, path: Path, mesh: MeshKind = 'auto', length_unit: str 
     if _NODES.get(etype.upper(), m.cells.shape[1]) != m.cells.shape[1]:
         raise ValueError(f'element type {etype} does not fit {m.cells.shape[1]}-node cells')
     scale = UNITS[length_unit]
+    section_line = '' if m.ndim == 3 else \
+        f'{(thickness if thickness is not None else result.voxel_size_m[0]) * scale:.10g}'
     path = Path(path).with_suffix('.inp')
     path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -99,7 +108,8 @@ def export_abaqus(result, path: Path, mesh: MeshKind = 'auto', length_unit: str 
         for name, nodes in m.face_nodes().items():
             _write_set(f, f'*Nset, nset={name.upper()}', nodes + 1)
         for g in grains:
-            f.write(f'*Solid Section, elset=GRAIN_{g}, material={material_name(result, int(g), material_per)}\n,\n')
+            f.write(f'*Solid Section, elset=GRAIN_{g}, material={material_name(result, int(g), material_per)}\n'
+                    f'{section_line},\n')
         f.write('*End Part\n**\n*Assembly, name=Assembly\n')
         f.write(f'*Instance, name={INSTANCE}, part=RVE\n*End Instance\n')
         _write_periodic(f, m, scale)
@@ -138,16 +148,16 @@ def _write_periodic(f, m, scale: float) -> None:
     names = {0: 'RP_X', 1: 'RP_Y', 2: 'RP_Z'}
     f.write('** reference nodes: u(RP_a) = jump of u across the box along axis a\n*Node\n')
     for i, a in enumerate(axes, start=1):
-        pos = np.zeros(3)
+        pos = np.zeros(m.ndim)
         pos[a] = 1.5 * m.box_size_m[a] * scale
-        f.write(f'{i}, {pos[0]:.10g}, {pos[1]:.10g}, {pos[2]:.10g}\n')
+        f.write(f'{i}, ' + ', '.join(f'{c:.10g}' for c in pos) + '\n')
     for i, a in enumerate(axes, start=1):
         f.write(f'*Nset, nset={names[a]}\n{i}\n')
     f.write('** periodic boundary conditions: u_slave - u_master - sum_a k_a u(RP_a) = 0\n')
     lines = []
     for s, mst, k in zip(slave + 1, master + 1, offset):
-        rps = [names[a] for a in range(3) if k[a]]
-        for dof in (1, 2, 3):
+        rps = [names[a] for a in range(m.ndim) if k[a]]
+        for dof in range(1, m.ndim + 1):
             terms = [f'{INSTANCE}.{s}, {dof}, 1.', f'{INSTANCE}.{mst}, {dof}, -1.'] + \
                     [f'{rp}, {dof}, -1.' for rp in rps]
             lines.append('*Equation')

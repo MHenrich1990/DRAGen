@@ -16,7 +16,8 @@ INPUT_DIRS = (REPO_ROOT / 'ExampleInput', REPO_ROOT / 'benchmarks' / 'inputs')
 
 NOT_SUPPORTED = [
     {'feature': 'Slope offset', 'planned': 'E2', 'note': 'not implemented in the new code (V25)'},
-    {'feature': '2D RVEs', 'planned': 'E2', 'note': 'the new pipeline is only tested in 3D'},
+    {'feature': '2D RVEs', 'planned': 'later',
+     'note': 'library (RVESpec with two box sizes) and CLI support 2D with triangle meshes; the GUI form and views are 3D only'},
     {'feature': 'Progress per epoch, animations', 'planned': 'E2',
      'note': 'the generator reports stage timings only'},
 ]

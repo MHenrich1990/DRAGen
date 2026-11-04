@@ -44,75 +44,37 @@ For more:
 
 <p align="left"><img src="docs/DRAGen_readme_paper.jpg" height="400" alt=""> </img></p>
 
-_Note: For developing it is highly recommended to use Python versions Python 3.10._<br>
 **If further questions appear please check the lower section or get in touch with us.**
 
 
 ## Installation
 
-As the first step, conda needs to be installed.
-To be sure conda is installed correctly on your system [look up here](https://docs.conda.io/projects/conda/en/latest/user-guide/install/index.html)<br>
+DRAGen needs Python 3.12 or newer. Clone the repository and install it into a virtual environment
+(conda, venv or uv):
 
-Git must be installed on the system. Check with:
 ```
-$ git --version
+git clone https://github.com/ibf-RWTH/DRAGen.git
+cd DRAGen
+python -m venv .venv                      # or: conda create --name DRAGen python=3.12
+.venv/Scripts/activate                    # Linux/macOS: source .venv/bin/activate
+pip install -e ".[ml,damask]"             # ml: GAN grain sources (torch), damask: DAMASK export
 ```
-If it has not been installed use this:
-```
-$ conda install -c anaconda git
-```
-Open the user path and create the directory where the DRAGen repo will be cloned.
-Should be like this:
-```
-(base) C:\Users> cd \Users\{username}
-(base) C:\Users\username> mkdir GitRepos
-(base) C:\Users\username> cd GitRepos
-```
-To clone this repository into the desired destination, use:<br>
-```
-$ git clone https://github.com/ibf-RWTH/DRAGen.git
-```
-To be able to use DRAGen, the working directory must be set to the location where the repo was downloaded to in the previous step file which is downloaded at the previous step.
-Use the commands to go to the exact file by following the path.
-```
-$ cd DRAGen
-```
-To see the folders on the current point:
-```
-$ dir
-```
-Create a virtual environment as follows:<br>
-```
-$ conda create --name DRAGen python=3.10
-$ conda activate DRAGen
-```
-(if an error occurs check your conda installation)<br>
-To see the list of the environments on conda:
-```
-$ conda info --envs
-```
-Be sure the DRAGen environment is activated it should look somewhat like this:<br>
-```
-(DRAGen)....$ 
-```
-Install one of two required module packages depending on cuda availability on the device:
 
-To install requirements without cuda:<br> 
+Check the installation with a first RVE:
+
 ```
-(DRAGen)....$ pip install -r requirements.txt 
+dragen template config.yaml               # example configuration (micrometres)
+dragen generate config.yaml -o out -f grains,vtu,abaqus
+dragen gui                                # browser front end "DRAGen Studio"
 ```
-To install requirements if cuda is available:<br> 
-```
-(DRAGen)....$ pip install -r requirements_cuda.txt 
-```
-Check if every step is utilized correctly by running first generation with:<br>
-```
-(DRAGen)....$ python DRAGen_nogui.py
-```
-Run DRAGen:<br>
-```
-(DRAGen)....$ python DRAGen.py
-```
+
+`dragen generate` writes one directory per RVE (`out/rve_000`, ...) with `rve.npz`,
+`metadata.json`, the configuration and the requested exports (`-f damask,abaqus,exodus,vtu,gmsh,
+grains` or `all`; `--mesh tet` adds a tetrahedral mesh with smoothed grain boundaries). A
+`substructure:` section in the configuration adds martensite packets and blocks
+(`dragen.substructure.SubstructureConfig`). `dragen export out/rve_000 -f damask` exports a saved
+RVE again. The PyQt GUI and the generator of DRAGen 1.x (`DRAGen.py`, `DRAGen_nogui.py`) are
+available on the git tag `legacy-baseline`.
 
 ## Use as a library
 
@@ -123,9 +85,7 @@ scipy, pandas, pyyaml, gmsh and meshio; everything else is an optional extra:
 |---|---|
 | `ml` | grain sources from trained GANs (`.pkl`): torch, geomloss, qhoptim, matplotlib (Agg), seaborn, tqdm |
 | `damask` | `export_damask` |
-| `extra` | rarely used helpers of the legacy code |
-| `gui` | PyQt GUI `DRAGen.py` and the legacy generator `DRAGen_nogui.py` |
-| `test` | pytest |
+| `test` | pytest, netCDF4 (reads the Exodus files back in the tests) |
 
 ```
 pip install -e ".[ml,damask]"          # or, from another uv project: uv add --editable "../DRAGen[ml,damask]"

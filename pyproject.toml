@@ -28,17 +28,11 @@ dragen = "dragen.cli:main"
 damask = ["damask>=3.0.2"]
 # grain sources from trained WGANs (.pkl) and their training code in InputGenerator
 ml = ["torch>=2.2", "geomloss", "qhoptim", "matplotlib>=3.8", "seaborn", "tqdm"]
-# rarely used helpers of the legacy code (shape analysis, rough surfaces, Exodus writer)
-extra = ["opencv-python-headless", "perlin-noise", "netCDF4"]
-# PyQt GUI (DRAGen.py) and the legacy generator behind it (DRAGen_nogui.py, dragen.run)
-gui = [
-    "PyQt5>=5.15", "damask>=3.0.2", "matplotlib>=3.8", "seaborn", "pyvista>=0.43", "vtk",
-    "Pillow", "tetgen", "networkx", "scikit-learn", "tqdm",
-]
-test = ["pytest>=8"]
+# tests (netCDF4 reads the Exodus files back independently of the writer)
+test = ["pytest>=8", "netCDF4"]
 
 [tool.setuptools.packages.find]
 include = ["dragen*", "InputGenerator*"]
 
 [tool.setuptools.package-data]
-dragen = ["thumbnails/*", "gui/static/*"]
+dragen = ["gui/static/*"]

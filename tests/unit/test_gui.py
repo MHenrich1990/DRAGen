@@ -41,10 +41,10 @@ def call(server, path, method='GET', body=None, raw=False):
 
 @pytest.fixture(scope='module')
 def tiny_config():
-    import legacy_baseline
+    import common
     config = runs.default_config()
     config['box'] = {'size': [10.0, 10.0, 10.0], 'resolution': 1.0, 'periodic': [True, True, True]}
-    config['phases'] = [{'phase': 'ferrite', 'source': legacy_baseline.lognormal_input(), 'fraction': 1.0}]
+    config['phases'] = [{'phase': 'ferrite', 'source': common.lognormal_input(), 'fraction': 1.0}]
     config['seed'] = 3
     return config
 

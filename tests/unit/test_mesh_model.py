@@ -118,11 +118,11 @@ def test_pyvista_export(tmp_path):
 
 @pytest.fixture(scope='module')
 def generated():
-    import legacy_baseline
+    import common
     from dragen.config import BoxConfig, PhaseConfig, RveConfig
     from dragen.pipeline import generate
     config = RveConfig(box=BoxConfig((15,) * 3, 2),
-                       phases=(PhaseConfig('ferrite', legacy_baseline.lognormal_input(), 1.0),), seed=2)
+                       phases=(PhaseConfig('ferrite', common.lognormal_input(), 1.0),), seed=2)
     return generate(config)
 
 

@@ -11,7 +11,8 @@ def grain_table(result) -> pd.DataFrame:
 
     grain_id, phase_id, phase, band_id (-1 outside bands), voxels, volume_m3 (voxel volume),
     eq_diameter_m (diameter of the sphere with that volume), a_m, b_m, c_m, alpha_deg (sampled
-    ellipsoid, if the result has it), phi1, PHI, phi2 (Bunge, degrees), qw, qx, qy, qz
+    ellipsoid, if the result has it), parent_grain_id and packet_id (after a substructure; the
+    rows are then blocks and grains without substructure), phi1, PHI, phi2 (Bunge, degrees), qw, qx, qy, qz
     (quaternion crystal -> sample, see dragen.api).
     """
     n = result.n_grains
@@ -29,6 +30,8 @@ def grain_table(result) -> pd.DataFrame:
     if result.radii_m is not None:
         table.update(a_m=result.radii_m[:, 0], b_m=result.radii_m[:, 1], c_m=result.radii_m[:, 2],
                      alpha_deg=result.alpha_deg)
+    if result.parent_grain_ids is not None:
+        table.update(parent_grain_id=result.parent_grain_ids, packet_id=result.packet_ids)
     table.update(phi1=result.euler_bunge_deg[:, 0], PHI=result.euler_bunge_deg[:, 1],
                  phi2=result.euler_bunge_deg[:, 2])
     table.update({f'q{c}': result.orientations[:, i] for i, c in enumerate('wxyz')})

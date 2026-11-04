@@ -15,8 +15,6 @@ from dragen.gui.jobs import REPO_ROOT
 INPUT_DIRS = (REPO_ROOT / 'ExampleInput', REPO_ROOT / 'benchmarks' / 'inputs')
 
 NOT_SUPPORTED = [
-    {'feature': 'Substructure (packets, blocks)', 'planned': 'E2',
-     'note': 'dragen.substructure exists but is not connected to the new pipeline yet'},
     {'feature': 'Slope offset', 'planned': 'E2', 'note': 'not implemented in the new code (V25)'},
     {'feature': '2D RVEs', 'planned': 'E2', 'note': 'the new pipeline is only tested in 3D'},
     {'feature': 'Progress per epoch, animations', 'planned': 'E2',

@@ -29,7 +29,8 @@ def config_file(tmp_path_factory):
 
 def test_template_is_a_valid_configuration(tmp_path):
     assert main(['-q', 'template', str(tmp_path / 't.yaml')]) == 0
-    config, mesh, export = load_config(tmp_path / 't.yaml')
+    config, mesh, export, substructure = load_config(tmp_path / 't.yaml')
+    assert substructure == {}
     assert config.box.shape == (50, 50, 50) and mesh['kind'] == 'voxel' and 'grains' in export['formats']
 
 
@@ -78,3 +79,19 @@ def test_tet_mesh_from_the_command_line(config_file, tmp_path):
 def test_module_entry_point():
     out = subprocess.run([sys.executable, '-m', 'dragen', '--help'], capture_output=True, text=True, timeout=60)
     assert out.returncode == 0 and 'generate' in out.stdout and 'export' in out.stdout
+
+
+def test_substructure_from_the_configuration(config_file, tmp_path):
+    data = yaml.safe_load(config_file.read_text())
+    data['phases'] = [{'phase': 'ferrite', 'source': data['phases'][0]['source'], 'fraction': 0.5},
+                      {'phase': 'martensite', 'source': data['phases'][0]['source'], 'fraction': 0.5}]
+    data['substructure'] = {'block_thickness': 0.5, 'min_packet_voxels': 50}
+    path = tmp_path / 'subs.yaml'
+    path.write_text(yaml.safe_dump(data))
+    assert main(['-q', 'generate', str(path), '-o', str(tmp_path / 'o')]) == 0
+    rve = RVEResult.load(tmp_path / 'o' / 'rve_000')
+    blocks = RVEResult.load(tmp_path / 'o' / 'rve_000' / 'substructure')
+    assert blocks.n_grains > rve.n_grains
+    assert np.array_equal(blocks.parent_grain_ids[blocks.grain_ids - 1], rve.grain_ids)
+    table = pd.read_csv(tmp_path / 'o' / 'rve_000' / 'grains.csv')            # exported: the blocks
+    assert len(table) == blocks.n_grains and 'packet_id' in table

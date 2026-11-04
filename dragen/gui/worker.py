@@ -176,6 +176,14 @@ def export_job(job_dir: Path) -> None:
         _log(f'mesh: voxels ({labels.size} hexahedra)')
     result = result_from_generation(config, labels, grains, tet=tet,
                                     metadata={'gui_run': run_dir.name, 'gui_mesh': options.get('mesh_dir')})
+    substructure = None
+    if options.get('substructure'):
+        from dragen.substructure import SubstructureConfig, apply_substructure, generate_substructure
+        sub = generate_substructure(result, SubstructureConfig.from_dict(options['substructure']))
+        result = apply_substructure(result, sub)
+        substructure = sub.stats
+        _log(f'substructure: {sub.stats["packets"]} packets, {sub.stats["blocks"]} blocks -> '
+             f'{result.n_grains} regions')
     out_dir = job_dir / 'export'
     files, seconds = [], {}
     for fmt in options['formats']:
@@ -207,7 +215,7 @@ def export_job(job_dir: Path) -> None:
                 z.write(path, path.relative_to(out_dir).as_posix())
     summary = {'parent': job_dir.name, 'run': run_dir.name, 'mesh': 'tet' if tet is not None else 'voxel',
                'cell_type': tet.cell_type if tet is not None else 'hexahedron', 'options': options,
-               'files': files, 'seconds': seconds, 'zip_bytes': (job_dir / 'export.zip').stat().st_size}
+               'files': files, 'seconds': seconds, 'substructure': substructure, 'zip_bytes': (job_dir / 'export.zip').stat().st_size}
     (job_dir / 'export.json').write_text(json.dumps(_plain(summary), indent=2), encoding='utf-8')
     _log(f'{len(files)} files, export.zip {summary["zip_bytes"] / 2 ** 20:.1f} MB')
 

@@ -551,6 +551,7 @@ function renderExport() {
       el('div', { class: 'kpis' },
         kpi('Files', fmt(exp.files.length)), kpi('Mesh', exp.mesh, exp.cell_type),
         kpi('Archive', mb(exp.zip_bytes), 'export.zip'),
+        exp.substructure ? kpi('Substructure', fmt(exp.substructure.blocks) + ' blocks', `${fmt(exp.substructure.packets)} packets`) : null,
         kpi('Time', dur(Object.values(exp.seconds || {}).reduce((a, b) => a + b, 0)))),
       el('div', { class: 'card' }, el('h2', {}, 'Files'),
         el('table', { class: 'kv' }, ...exp.files.map(f => el('tr', {}, el('td', { class: 'mono' }, f.name),
@@ -585,6 +586,10 @@ function renderExport() {
         el('label', {}, 'Abaqus materials', el('select', { id: 'export-per' },
           el('option', { value: 'grain' }, 'one per grain (Ferrite_12, …)'), el('option', { value: 'phase' }, 'one per phase (Ferrite, …)'))),
         el('label', {}, 'Abaqus element type', el('input', { type: 'text', id: 'export-element', placeholder: 'default: C3D8 / C3D10' }))),
+      el('div', { class: 'row two' },
+        el('label', { class: 'check inline' }, el('input', { type: 'checkbox', id: 'export-subs' }),
+          el('span', {}, 'Martensite substructure (packets, blocks; martensite, pearlite, bainite)')),
+        el('label', {}, 'Block thickness [µm]', el('input', { type: 'number', id: 'export-block', min: '0', step: 'any', value: '1' }))),
       el('p', { class: 'hint' }, doneMeshes.length ? 'DAMASK always uses the voxels.' :
         'Without a finished mesh the voxels are exported; “⬡ Mesh” builds a smoothed tetrahedral mesh first. DAMASK always uses the voxels.'),
       el('button', { class: 'btn primary', onclick: () => jobAction('export') }, '⇩ Start export')),
@@ -599,6 +604,7 @@ function readExportForm() {
     length_unit: $('#export-unit').value,
     material_per: $('#export-per').value,
     element_type: $('#export-element').value.trim() || null,
+    substructure: $('#export-subs').checked ? { block_thickness: Number($('#export-block').value) } : null,
   };
 }
 

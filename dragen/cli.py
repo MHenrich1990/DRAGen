@@ -6,14 +6,16 @@
     dragen gui [--port 8765]                   browser front end (DRAGen Studio)
 
 The configuration is the YAML of dragen.config.RveConfig (micrometres, as in the GUI presets)
-with two optional sections for the command line:
+with optional sections for the command line:
 
     mesh:   {kind: voxel | tet, order: 2}
     export: {formats: [damask, abaqus, exodus, vtu, gmsh, grains],
              length_unit: m, material_per: grain, element_type: null}
+    substructure: {block_thickness: 1.0, ...}      # dragen.substructure.SubstructureConfig
 
 Command line options override these sections. Every RVE goes into <out>/rve_<k>/: rve.npz and
-metadata.json (dragen.api.RVEResult.save), config.yaml and the export files. n_rves > 1 gives
+metadata.json (dragen.api.RVEResult.save), config.yaml and the export files. With a substructure
+the RVE with one region per block is saved in <out>/rve_<k>/substructure/ and exported instead. n_rves > 1 gives
 consecutive seeds starting at `seed`.
 """
 import argparse
@@ -29,16 +31,17 @@ import yaml
 log = logging.getLogger('dragen.cli')
 
 FORMATS = ('damask', 'abaqus', 'exodus', 'vtu', 'gmsh', 'grains')
-CLI_SECTIONS = ('mesh', 'export')
+CLI_SECTIONS = ('mesh', 'export', 'substructure')
 
 
 def load_config(path: Path):
-    """(RveConfig, mesh section, export section) from a configuration file."""
+    """(RveConfig, mesh section, export section, substructure section) from a configuration file."""
     from dragen.config import RveConfig
     data = yaml.safe_load(Path(path).read_text(encoding='utf-8')) or {}
     mesh = data.pop('mesh', None) or {}
     export = data.pop('export', None) or {}
-    return RveConfig.from_dict(data), dict(mesh), dict(export)
+    substructure = data.pop('substructure', None) or {}
+    return RveConfig.from_dict(data), dict(mesh), dict(export), dict(substructure)
 
 
 def template() -> str:
@@ -81,10 +84,13 @@ def export_result(result, out_dir: Path, formats: List[str], length_unit: str = 
     return out
 
 
-def generate(config, out: Path, mesh: dict, export: dict) -> List[Path]:
+def generate(config, out: Path, mesh: dict, export: dict, substructure: Optional[dict] = None) -> List[Path]:
     """Generate config.n_rves RVEs into out/rve_<k>; returns their directories."""
     from dragen.api import _tet_mesh, result_from_generation
     from dragen.pipeline import generate as run_pipeline
+    from dragen.substructure import SubstructureConfig, apply_substructure, generate_substructure
+
+    subs_config = SubstructureConfig.from_dict(substructure) if substructure else None
 
     kind = mesh.get('kind', 'voxel')
     if kind not in ('voxel', 'tet'):
@@ -111,6 +117,12 @@ def generate(config, out: Path, mesh: dict, export: dict) -> List[Path]:
                                      metadata={'config': one.to_dict(), 'seconds': seconds, **meta})
         rve.save(rve_dir)
         log.info('  %d grains in %.1f s', rve.n_grains, seconds['total'])
+        if subs_config is not None:
+            sub = generate_substructure(rve, replace(subs_config, seed=subs_config.seed + k))
+            rve = apply_substructure(rve, sub)
+            rve.save(rve_dir / 'substructure')
+            log.info('  substructure: %d packets, %d blocks -> %d regions', sub.stats['packets'],
+                     sub.stats['blocks'], rve.n_grains)
         if export.get('formats'):
             export_result(rve, rve_dir, list(export['formats']), export.get('length_unit', 'm'),
                           export.get('material_per', 'grain'), export.get('element_type'))
@@ -175,7 +187,7 @@ def main(argv=None) -> int:
             else:
                 sys.stdout.write(text)
         elif args.command == 'generate':
-            config, mesh, export = load_config(args.config)
+            config, mesh, export, substructure = load_config(args.config)
             if args.seed is not None:
                 config = replace(config, seed=args.seed)
             if args.n_rves is not None:
@@ -185,7 +197,7 @@ def main(argv=None) -> int:
             if args.order:
                 mesh['order'] = args.order
             _override(export, args)
-            generate(config, args.out, mesh, export)
+            generate(config, args.out, mesh, export, substructure)
         elif args.command == 'export':
             from dragen.api import RVEResult
             export = {}

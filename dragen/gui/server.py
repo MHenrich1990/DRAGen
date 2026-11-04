@@ -17,7 +17,8 @@
     GET    /api/jobs/<id>/files/<name>     config.yaml, result.json, grains.csv, labels.npz, mesh.*
     POST   /api/jobs/<id>/cancel
     POST   /api/jobs/<id>/mesh             start a meshing job for a finished generation run
-    POST   /api/jobs/<id>/export           {formats, mesh, length_unit, material_per, element_type}
+    POST   /api/jobs/<id>/export           {formats, mesh, length_unit, material_per, element_type,
+                                            substructure: SubstructureConfig dict or null}
                                            -> export job (files of dragen.export, export.zip)
     DELETE /api/jobs/<id>
 """
@@ -277,9 +278,16 @@ class Handler(BaseHTTPRequestHandler):
         element = str(body.get('element_type') or '').strip().upper() or None
         if element is not None and not element.replace('_', '').isalnum():
             raise ApiError(HTTPStatus.BAD_REQUEST, f'invalid element type {element!r}')
+        substructure = body.get('substructure') or None
+        if substructure is not None:
+            from dragen.substructure import SubstructureConfig
+            try:
+                substructure = SubstructureConfig.from_dict(substructure).to_dict()
+            except (ValueError, TypeError, FileNotFoundError) as err:
+                raise ApiError(HTTPStatus.BAD_REQUEST, f'substructure: {err}')
         run_dir = jobs.path(job.id)
         return {'run_dir': str(run_dir.resolve()), 'mesh_dir': mesh_dir, 'formats': list(dict.fromkeys(formats)),
-                'length_unit': unit, 'material_per': per, 'element_type': element}
+                'length_unit': unit, 'material_per': per, 'element_type': element, 'substructure': substructure}
 
     def _surface_sources(self, job) -> list:
         """Staircase for every finished run, plus the smoothed surface of each finished meshing

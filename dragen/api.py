@@ -247,6 +247,9 @@ class RVEResult:
     radii_m: (G, 3) semi-axes a, b, c of the sampled ellipsoid in metres (for a band the sphere
         of its summed grain volume), alpha_deg: (G,) its tilt about ND. The grain's voxels are
         the result of the tessellation, not this ellipsoid.
+    parent_grain_ids, packet_ids: (G,) only after dragen.substructure.apply_substructure: the
+        regions are then blocks and grains without substructure; parent grain and packet of each
+        region (packet -1 for grains without substructure).
     box_size_m: (x, y, z) edge lengths in metres.
     tet_mesh: only for spec.mesh == 'tet'.
     metadata: dragen version, git commit, seed, SHA-256 of the spec and the input files, run
@@ -264,6 +267,8 @@ class RVEResult:
     radii_m: Optional[np.ndarray] = None
     alpha_deg: Optional[np.ndarray] = None
     tet_mesh: Optional[TetMesh] = None
+    parent_grain_ids: Optional[np.ndarray] = None
+    packet_ids: Optional[np.ndarray] = None
     metadata: dict = field(default_factory=dict)
 
     def __post_init__(self):
@@ -290,6 +295,8 @@ class RVEResult:
                       euler_bunge_deg=self.euler_bunge_deg, phase_ids=self.phase_ids,
                       band_ids=self.band_ids,
                       **({} if self.radii_m is None else dict(radii_m=self.radii_m, alpha_deg=self.alpha_deg)),
+                      **({} if self.parent_grain_ids is None else dict(parent_grain_ids=self.parent_grain_ids,
+                                                                       packet_ids=self.packet_ids)),
                       box_size_m=np.array(self.box_size_m), periodic=np.array(self.periodic))
         if self.tet_mesh is not None:
             arrays.update(tet_points=self.tet_mesh.points, tet_cells=self.tet_mesh.cells,
@@ -318,6 +325,8 @@ class RVEResult:
                    band_ids=data['band_ids'] if 'band_ids' in data else None,
                    radii_m=data['radii_m'] if 'radii_m' in data else None,
                    alpha_deg=data['alpha_deg'] if 'alpha_deg' in data else None,
+                   parent_grain_ids=data['parent_grain_ids'] if 'parent_grain_ids' in data else None,
+                   packet_ids=data['packet_ids'] if 'packet_ids' in data else None,
                    tet_mesh=tet, metadata=meta)
 
 

@@ -34,7 +34,8 @@ def export_abaqus(result, path: Path, mesh: MeshKind = 'auto', length_unit: str 
 
     <path>.inp
         Part RVE with the nodes, the elements (C3D8 for voxels, C3D4/C3D10 for tets, or
-        `element_type`), element sets GRAIN_<g>, <PHASE> (e.g. FERRITE) and BAND_<k>, node sets
+        `element_type`), element sets GRAIN_<g>, <PHASE> (e.g. FERRITE) and BAND_<k> (after a
+        substructure GRAIN_<g> are the regions, plus PARENT_<g> and PACKET_<p>), node sets
         of the box faces (LEFT/RIGHT x, BOTTOM/TOP y, BACK/FRONT z), one solid section per grain
         with material material_name(...). Assembly with instance RVE-1 and, for every periodic
         axis a, a reference node RP_X/RP_Y/RP_Z whose displacement is the jump of the
@@ -86,6 +87,15 @@ def export_abaqus(result, path: Path, mesh: MeshKind = 'auto', length_unit: str 
         elem_band = result.band_ids[m.grain_ids - 1]
         for k in np.unique(elem_band[elem_band >= 0]):
             _write_set(f, f'*Elset, elset=BAND_{k}', element[elem_band == k])
+        if result.parent_grain_ids is not None:          # substructure: regions are blocks
+            elem_parent = result.parent_grain_ids[m.grain_ids - 1]
+            elem_packet = result.packet_ids[m.grain_ids - 1]
+            for name, values in (('PARENT', elem_parent), ('PACKET', elem_packet)):
+                order = np.argsort(values, kind='stable')
+                ids, starts = np.unique(values[order], return_index=True)
+                for v, members in zip(ids, np.split(element[order], starts[1:])):
+                    if v > 0:
+                        _write_set(f, f'*Elset, elset={name}_{v}', members)
         for name, nodes in m.face_nodes().items():
             _write_set(f, f'*Nset, nset={name.upper()}', nodes + 1)
         for g in grains:

@@ -57,7 +57,7 @@ def test_static_app_and_info(server):
     status, info = call(server, '/api/info')
     assert status == 200
     assert 'ferrite' in info['phases'] and info['defaults']['box']['size']
-    assert any('Substructure' in f['feature'] for f in info['not_supported'])
+    assert any('2D' in f['feature'] for f in info['not_supported'])
 
 
 def test_validation_errors_are_readable(server, tiny_config):
@@ -324,3 +324,18 @@ def test_export_job(server, tiny_config):
     assert f'*Element, type=C3D8' in inp and 'material=Ferrite\n' in inp
     assert '10, 10, 10\n' in inp or ', 10, 10, 10' in inp                  # last node at 10 um
     assert inp.count('*Elset, elset=GRAIN_') == int(labels.max())
+
+
+def test_export_with_substructure(server, tiny_config):
+    config = dict(tiny_config, phases=[dict(tiny_config['phases'][0], fraction=0.5),
+                                       dict(tiny_config['phases'][0], phase='martensite', fraction=0.5)])
+    run = call(server, '/api/jobs', 'POST', {'config': config})[1]['jobs'][0]['id']
+    assert _wait(server, run)['status'] == 'done'
+    assert call(server, f'/api/jobs/{run}/export', 'POST',
+                {'formats': ['grains'], 'substructure': {'block_thickness': -1}})[0] == 400
+    exp = call(server, f'/api/jobs/{run}/export', 'POST',
+               {'formats': ['grains'], 'substructure': {'block_thickness': 1.0, 'min_packet_voxels': 20}})[1]['job']['id']
+    assert _wait(server, exp)['status'] == 'done'
+    summary = call(server, f'/api/jobs/{exp}')[1]['export']
+    assert summary['substructure']['blocks'] > 0
+    assert not any('Substructure' in f['feature'] for f in call(server, '/api/info')[1]['not_supported'])

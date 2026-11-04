@@ -83,8 +83,9 @@ def test_island_grain_is_a_hole():
     assert len(closed) == 1
     m = mesh_rve_2d(labels, (0.5, 0.5), (True, True), Mesh2DConfig())
     check_mesh(m, (10.0, 10.0), (True, True), (0.5, 0.5), 2)
-    area = np.bincount(m.grain, weights=0.5 * np.abs(np.cross(m.points[m.cells[:, 1]] - m.points[m.cells[:, 0]],
-                                                                m.points[m.cells[:, 2]] - m.points[m.cells[:, 0]])))
+    u = m.points[m.cells[:, 1]] - m.points[m.cells[:, 0]]
+    v = m.points[m.cells[:, 2]] - m.points[m.cells[:, 0]]
+    area = np.bincount(m.grain, weights=0.5 * np.abs(u[:, 0] * v[:, 1] - u[:, 1] * v[:, 0]))
     assert area[2] == pytest.approx(np.count_nonzero(labels == 2) * 0.25, rel=0.005)
 
 
